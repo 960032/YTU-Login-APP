@@ -12,6 +12,12 @@
   QUERY_ALL_PACKAGES、READ_CALL_LOG / READ_SMS / READ_CONTACTS、POST_NOTIFICATIONS
   （本版本不发送任何通知，故不申请；理由见 artifacts/android-ci/ci-report.md）。
   本版本**不使用前台服务**（无 FOREGROUND_SERVICE 权限、无前台服务类型声明）。
+
+  明文 HTTP（crashfix1 任务 B）：
+    targetSdk = 36 → Android 9（API 28）起 cleartextTrafficPermitted 默认 false。SRun 门户是纯 http://
+    （无 TLS），**不修则「立即登录」必被系统拦掉**（cleartext HTTP traffic not permitted）。
+    这里**不**用全局 android:usesCleartextTraffic="true"，而用最小范围的 network security config：
+    只放行校内 Portal 的两个目标（见 res/xml/network_security_config.xml），其余保持默认拒绝。
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
@@ -34,6 +40,7 @@
         android:name="top.ytu.srunautologin.App"
         android:allowBackup="false"
         android:label="@string/app_name"
+        android:networkSecurityConfig="@xml/network_security_config"
         android:supportsRtl="true"
         android:theme="@style/AppTheme">
 

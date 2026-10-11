@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  网络安全配置（crashfix1 任务 B）—— **最小范围放行明文 HTTP**。
+
+  背景：targetSdk = 36，Android 9（API 28）起 cleartextTrafficPermitted 默认为 false；
+  而 SRun 认证门户本身是纯 http://（无 TLS 可用），必须放行，否则「立即登录」必被系统拦掉：
+      java.io.IOException: Cleartext HTTP traffic to 202.194.116.116 not permitted
+
+  为什么不用全局 android:usesCleartextTraffic="true"：
+    全局放开会让**所有**明文 HTTP 目标（含第三方域名、被劫持的跳转）都变成合法请求路径，
+    放大了攻击面；这里只对校内认证所需的两个目标放行，其余保持系统默认拒绝。
+
+  生效范围（base-config 未出现 cleartextTrafficPermitted="true" → 默认 false → 全站默认拒绝）：
+    - 202.194.116.116：真实校园网 SRun 门户地址（flow/AuthFlow.kt 中由用户/默认值拼出的 Portal）
+    - 172.16.0.1     ：AuthFlow.DEFAULT_PORTAL（备用/其他校区常见门户网关 IP）
+  两个都是 IP 字面量，按 Android 文档要求写在 <domain> 里（domain 亦接受主机名，不支持 IP 段/CIDR），
+  因此**无法**用「整个校园内网网段」表达；若将来门户换成域名，需再补一条 <domain>。
+-->
+<network-security-config>
+
+    <!-- 全局默认：明文 HTTP 一律拒绝（与 API 28+ 系统默认一致；显式写出以便审阅） -->
+    <base-config cleartextTrafficPermitted="false">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+
+    <!-- 例外：仅校内认证门户允许明文 HTTP -->
+    <domain-config cleartextTrafficPermitted="true">
+        <domain includeSubdomains="false">202.194.116.116</domain>
+        <domain includeSubdomains="false">172.16.0.1</domain>
+    </domain-config>
+
+</network-security-config>

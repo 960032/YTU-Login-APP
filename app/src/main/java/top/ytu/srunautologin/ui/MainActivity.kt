@@ -4,6 +4,7 @@ import android.app.Activity
 import android.app.AlertDialog
 import android.content.pm.PackageManager
 import android.os.Bundle
+import android.util.Log
 import android.view.View
 import android.widget.AdapterView
 import android.widget.ArrayAdapter
@@ -28,6 +29,7 @@ import top.ytu.srunautologin.net.WifiSnapshotCore
 import top.ytu.srunautologin.platform.AndroidWifiPermissionFlow
 import top.ytu.srunautologin.platform.AndroidWifiSource
 import top.ytu.srunautologin.platform.SrunStorage
+import java.io.File
 
 /**
  * 配置界面 Activity —— **只做薄绑定**：所有业务判断都在 [ConfigViewModel]（纯逻辑，可离线测试）。
@@ -104,6 +106,9 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
+        // 说明（crashfix1 任务 A）：setContentView + 下面这 13 个 findViewById **故意留在 try 之外**。
+        // 依据 artifacts/crash-audit1/audit-report.md：布局与 id 已逐个核对匹配，这段调用不依赖权限、
+        // 不访问磁盘、不取系统服务，不在「可能抛异常」的清单里；把它们一起包住只会掩盖布局类错误。
         editUsername = findViewById(R.id.edit_username)
         editPassword = findViewById(R.id.edit_password)
         spinnerCarrier = findViewById(R.id.spinner_carrier)
@@ -117,10 +122,59 @@ class MainActivity : Activity() {
         btnLoginNow = findViewById(R.id.btn_login_now)
         editNewSsid = findViewById(R.id.edit_new_ssid)
 
-        buildAuthFlow()
-        buildViewModel()
-        bindViews()
-        refreshSsidList()
+        // 启动兜底（crashfix1 任务 A）：这条同步栈上有 8 处系统调用（getSharedPreferences /
+        // checkSelfPermission / getSystemService / getScanResults / getConnectionInfo），
+        // 任意一处抛异常在旧代码里都会直接终止 onCreate，窗口来不及绘制 → 表现为「纯白后瞬间缩回」。
+        // 这里把整条链兜住：真实崩溃点变成 logcat 一条栈 + filesDir 一个崩溃文件，而不是静默闪退。
+        try {
+            buildAuthFlow()
+            buildViewModel()
+            bindViews()
+            refreshSsidList()
+        } catch (e: Throwable) {
+            // ① 先写 logcat（含完整栈）—— 这是拿到真实崩溃点的第一通道
+            Log.e(TAG, "启动失败", e)
+            // ② 再落盘到 filesDir（纯排查用；写日志自身失败也必须被吞掉，绝不二次崩溃）
+            writeStartupCrashLog(e)
+            // ③ 再尝试把错误显示到界面：textStatus 是 lateinit，未经 findViewById 赋值前不能碰
+            if (this::textStatus.isInitialized) {
+                val message = "启动失败：" + e.javaClass.simpleName + "：" + (e.message ?: "无 message") +
+                    "\n详情见 files/" + CRASH_FILE + "（logcat 标签 " + TAG + "）"
+                runOnUiThread {
+                    try {
+                        textStatus.text = message
+                    } catch (t: Throwable) {
+                        Log.e(TAG, "显示启动失败信息时再次异常（已忽略）", t)
+                    }
+                }
+            }
+            // ④ 立即返回：不继续跑剩余初始化，避免「View 已绑、ViewModel 未建」这类半初始化状态
+            return
+        }
+    }
+
+    /**
+     * 写启动崩溃日志到 `filesDir/crash-startup.txt`（排查专用）。
+     *
+     * 三条硬约束：
+     *  1) 本方法**绝不能**把异常抛回调用方 —— 写日志失败再崩一次就失去了兜底的意义，故内部整体自吞；
+     *  2) 日志只含诊断信息（异常类型 / message / 栈）与时间戳，**不含**账号与密码
+     *     （栈帧只有包名与行号；凭据是从文件读出来的值，不会出现在异常 message 里）；
+     *  3) 用 `File(filesDir, ...)` 直写应用私有目录，不新增任何依赖。
+     */
+    private fun writeStartupCrashLog(e: Throwable) {
+        try {
+            val text = buildString {
+                append("time=").append(System.currentTimeMillis()).append('\n')
+                append("exception=").append(e.javaClass.name).append('\n')
+                append("message=").append(e.message ?: "无").append("\n\n")
+                append("stack=\n")
+                append(Log.getStackTraceString(e))
+            }
+            File(filesDir, CRASH_FILE).writeText(text)
+        } catch (t: Throwable) {
+            Log.e(TAG, "写启动崩溃日志失败（已忽略，不再抛出）", t)
+        }
     }
 
     /** 认证链路装配：存储（已冻结）+ WiFi 快照（已冻结）+ 认证客户端（本任务新增）。 */
@@ -284,6 +338,12 @@ class MainActivity : Activity() {
 
     private companion object {
         const val REQ_WIFI = 1001
+
+        /** logcat 过滤标签（排查启动闪退：`adb logcat -s SrunAutoLogin`）。 */
+        const val TAG = "SrunAutoLogin"
+
+        /** 启动崩溃落盘文件名（位于应用私有目录 files/）。 */
+        const val CRASH_FILE = "crash-startup.txt"
     }
 }
 

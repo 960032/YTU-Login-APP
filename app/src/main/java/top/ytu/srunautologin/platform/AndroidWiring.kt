@@ -70,26 +70,68 @@ class SharedPreferencesKeyValueStore(
     private val prefsName: String = "srun_autologin_store"
 ) : KeyValueStore {
 
-    private val prefs = context.applicationContext.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+    /**
+     * 加固（crashfix1 任务 C）：`getSharedPreferences` 在读取/解析已存在的 prefs XML 时理论上可能抛
+     * 未受检异常（损坏文件 → XmlPullParserException/IOException 一类的运行时包装），而本类的构造点
+     * 正好在 Activity.onCreate 的同步栈上。这里把「取 prefs 句柄」这一步兜住并降级为「空存储」，
+     * 避免一条损坏的 prefs 文件把整个界面拖成闪退；正常路径（返回非 null 句柄）行为完全不变。
+     */
+    private val prefs: android.content.SharedPreferences? = try {
+        context.applicationContext.getSharedPreferences(prefsName, Context.MODE_PRIVATE)
+    } catch (e: RuntimeException) {
+        Log.e(TAG, "打开 SharedPreferences 失败，降级为空存储", e)
+        null
+    }
 
-    override fun getString(key: String): String? = prefs.getString(key, null)
+    override fun getString(key: String): String? = try {
+        prefs?.getString(key, null)
+    } catch (e: RuntimeException) {
+        Log.e(TAG, "读 SharedPreferences 失败，按空值处理", e)
+        null
+    }
 
     override fun putString(key: String, value: String) {
-        prefs.edit().putString(key, value).apply()
+        try {
+            prefs?.edit()?.putString(key, value)?.apply()
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "写 SharedPreferences 失败（已忽略）", e)
+        }
     }
 
     override fun remove(key: String) {
-        prefs.edit().remove(key).apply()
+        try {
+            prefs?.edit()?.remove(key)?.apply()
+        } catch (e: RuntimeException) {
+            Log.e(TAG, "删 SharedPreferences 失败（已忽略）", e)
+        }
     }
 
-    override fun keys(): Set<String> = prefs.all.keys.toSet()
+    override fun keys(): Set<String> = try {
+        prefs?.all?.keys?.toSet().orEmpty()
+    } catch (e: RuntimeException) {
+        Log.e(TAG, "枚举 SharedPreferences 键失败，按空集处理", e)
+        emptySet()
+    }
+
+    private companion object {
+        const val TAG = "SrunAutoLogin"
+    }
 }
 
 /** [WifiSource] 的真机实现：WifiManager。无权限时返回 null / 空列表，不抛异常。 */
 class AndroidWifiSource(context: Context) : WifiSource {
 
-    private val wifiManager: WifiManager? =
+    /**
+     * 加固（crashfix1 任务 C）：`getSystemService` 内部走 ServiceFetcher，正常返回 null 而不抛异常
+     * （`as? WifiManager` 已能把 null 或类型不符都收成 null）；这里再加一层兜底，保证「取服务」这一步
+     * 在 Activity.onCreate 同步栈上永不影响窗口绘制。
+     */
+    private val wifiManager: WifiManager? = try {
         context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
+    } catch (e: RuntimeException) {
+        Log.e(TAG, "获取 WifiManager 失败，WiFi 相关能力降级为不可用", e)
+        null
+    }
 
     override fun isWifiEnabled(): Boolean = try {
         wifiManager?.isWifiEnabled ?: false
@@ -137,8 +179,20 @@ class AndroidWifiPermissionFlow(context: Context) : WifiPermissionFlow {
     override fun onRequestResult(outcome: WifiPermissionRequestOutcome): WifiPermissionState =
         delegate.onRequestResult(outcome)
 
+    /**
+     * 加固（crashfix1 任务 C）：`checkSelfPermission` 属于「查询」而非「使用」，正常不会抛
+     * SecurityException，但本方法在 Activity.onCreate 的同步栈上被反复调用（每个候选权限一次），
+     * 单点异常会终止整个界面。这里逐项兜住并降级为「未授予」（等价于走降级路径，不静默放行）。
+     */
     private fun grantedPermissions(): Set<String> = PERMISSION_CANDIDATES
-        .filter { appContext.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }
+        .filter {
+            try {
+                appContext.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED
+            } catch (e: RuntimeException) {
+                Log.e(TAG, "查询权限状态失败，按未授予处理：$it", e)
+                false
+            }
+        }
         .toSet()
 
     private companion object {
@@ -147,6 +201,8 @@ class AndroidWifiPermissionFlow(context: Context) : WifiPermissionFlow {
             WifiPermissionPolicy.ACCESS_COARSE_LOCATION,
             WifiPermissionPolicy.NEARBY_WIFI_DEVICES
         )
+
+        const val TAG = "SrunAutoLogin"
     }
 }
 
