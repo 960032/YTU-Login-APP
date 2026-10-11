@@ -464,7 +464,12 @@ object ClientChecks {
             )
             val req = demoRequest().copy(timeoutMs = 7000)
             val result = SrunAuthClient(engine, FakeIpProbe(null), { t.also { t += 30 } }).execute(req)
-            r.requireEquals(7000, req.timeoutMs, "超时可配置")
+            // 超时是 per-request 可配置字段（AuthRequest.timeoutMs 定义见 AuthModels.kt:53-59，
+            // 默认值 = SrunProtocol.DEFAULT_TIMEOUT_MS，常量定义见 AuthModels.kt:32），不是写死的设计常量：
+            // 故断言「默认值生效 + 显式覆盖生效 + 落在合理区间」，不写死具体毫秒数。
+            r.requireEquals(SrunProtocol.DEFAULT_TIMEOUT_MS, demoRequest().timeoutMs, "未显式配置时使用默认超时")
+            r.require(req.timeoutMs >= 3_000 && req.timeoutMs <= 60_000, "超时应落在合理区间 3000ms~60000ms，实际 ${req.timeoutMs}")
+            r.require(req.timeoutMs != SrunProtocol.DEFAULT_TIMEOUT_MS, "本用例应显式覆盖默认超时（默认 ${SrunProtocol.DEFAULT_TIMEOUT_MS}ms），实际 ${req.timeoutMs}")
             r.require(result.elapsedMs >= 0, "elapsedMs 应为非负")
             r.requireEquals(SrunProtocol.DEFAULT_TIMEOUT_MS, 15_000, "默认超时 15 秒")
             "elapsedMs=${result.elapsedMs}；默认超时=${SrunProtocol.DEFAULT_TIMEOUT_MS}ms"
@@ -564,11 +569,17 @@ object ClientChecks {
     /* ---------------- UI 纯逻辑（B2/B5/权限顺序） ---------------- */
 
     private fun checkUiLogic(r: CheckRunner) {
-        r.check("UI-1 B2 界面元素清单齐全（账号/密码/登录方式/WiFi 选择/保存 等 9 项）") {
+        r.check("UI-1 B2 界面元素清单齐全（必需元素全部在，允许合法新增）") {
             val names = UiSpec.ELEMENTS.map { it.name }
-            val required = listOf("账号输入", "密码输入", "登录方式二选一")
+            val required = listOf("账号输入", "密码输入", "登录方式二选一", "备注名", "WiFi 选择区", "权限说明与申请", "保存", "状态显示区", "立即登录")
             for (req in required) r.require(names.any { it.startsWith(req) }, "缺少界面元素：$req")
-            r.requireEquals(9, UiSpec.ELEMENTS.size, "元素数量")
+            // 口径：必需元素必须全部在（子集 + 下界），不写死总数——将来合法新增界面元素不应误报。
+            // 必需控件 id 以 UiSpec.kt:24-34 的声明与 activity_main.xml 的实际控件 id 为准。
+            val ids = UiSpec.ELEMENTS.flatMap { e -> e.viewId.split("/") }.map { it.trim() }.filter { it.isNotEmpty() }.toSet()
+            val mustHaveIds = listOf("edit_username", "edit_password", "spinner_carrier", "edit_label", "ssid_list", "btn_use_current_wifi", "text_permission_notice", "btn_request_permission", "btn_save", "text_status", "btn_login_now")
+            val missingIds = mustHaveIds.filterNot { it in ids }
+            r.require(missingIds.isEmpty(), "缺少必需控件 id：$missingIds（现有：$ids）")
+            r.require(UiSpec.ELEMENTS.size >= required.size, "元素数量下限：应 >= 必需项数（${required.size}），实际 ${UiSpec.ELEMENTS.size}")
             r.require(UiSpec.ELEMENTS.any { it.viewId == "edit_password" }, "缺密码输入框")
             UiSpec.ELEMENTS.joinToString("；") { it.toString() }
         }
@@ -722,7 +733,11 @@ object ClientChecks {
             vm.state.statusText
         }
         r.check("UI-14 状态区字段覆盖：成功/失败/原因/时间/阶段/耗时（结构声明）") {
-            r.requireEquals(5, UiSpec.STATUS_FIELDS.size, "字段类别数")
+            // 口径：必需字段类别必须全部在（子集 + 下界），不写死类别总数——允许合法新增状态字段。
+            val mustHaveCategories = listOf("成功或失败", "失败原因", "时间", "阶段", "耗时")
+            val fields = UiSpec.STATUS_FIELDS
+            for (cat in mustHaveCategories) r.require(fields.any { it.contains(cat) }, "状态区缺字段类别：$cat（现有：$fields）")
+            r.require(fields.size >= mustHaveCategories.size, "字段类别数下限：应 >= ${mustHaveCategories.size}，实际 ${fields.size}")
             r.requireEquals(true, UiSpec.FAILURE_MUST_BE_VISIBLE, "失败必须可见")
             UiSpec.STATUS_FIELDS.joinToString("|")
         }
