@@ -1,7 +1,0 @@
-<?xml version="1.0" encoding="utf-8"?>
-<!-- 原生主题：不引入 AppCompat / Material 等第三方 UI 库，保证零运行时依赖 -->
-<resources>
-    <style name="AppTheme" parent="@android:style/Theme.Material.Light">
-        <item name="android:windowNoTitle">false</item>
-    </style>
-</resources>
