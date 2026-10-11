@@ -9,6 +9,7 @@ import top.ytu.srunautologin.flow.AuthFlow
 import top.ytu.srunautologin.flow.CoreWifiSnapshotPort
 import top.ytu.srunautologin.flow.MapWifiAccountLookup
 import top.ytu.srunautologin.flow.PortalProvider
+import top.ytu.srunautologin.flow.StoredPortalProvider
 import top.ytu.srunautologin.net.WifiSnapshotCore
 import top.ytu.srunautologin.platform.AndroidWifiPermissionFlow
 import top.ytu.srunautologin.platform.AndroidWifiSource
@@ -44,10 +45,21 @@ object AndroidAuthTransportFactory : top.ytu.srunautologin.flow.AuthTransportFac
     )
 }
 
-/** Portal 地址（`172.16.0.1`，与 flow.AuthFlow.DEFAULT_PORTAL 同源，不重复写字面量）。 */
+/** Portal 地址回落到代码默认值 [AuthFlow.DEFAULT_PORTAL]（不重复写字面量；真机用下面的工厂）。 */
 object DefaultPortalProvider : PortalProvider {
     override fun portal(): String = AuthFlow.DEFAULT_PORTAL
 }
+
+/**
+ * Portal 地址的**真机实现**：从与界面同一份键值存储读取（用户保存值优先，缺失回落默认值）。
+ *
+ * 每次装配 [AndroidAuthRunEnv] 时现取一次 → 用户在配置界面改完 Portal 地址后，
+ * **下一次后台自动认证立刻使用新地址**，无需等重启（与前台「立即登录」走的 `StoredPortalProvider` 同一份实现）。
+ * `context` 必须是 **applicationContext**（避免持有 Activity）；它只在此函数被调用时使用一次，
+ * 函数返回后即被丢弃，因此不产生 Context 泄漏。
+ */
+fun portalProviderFrom(context: Context): PortalProvider =
+    StoredPortalProvider(SrunStorage.keyValueStore(context.applicationContext))
 
 /**
  * [AuthRunEnv] 的真机实现：用 Context 装配一次认证运行。
@@ -72,7 +84,7 @@ class AndroidAuthRunEnv(
             wifiMap = MapWifiAccountLookup(wifiMap),
             wifiSnapshot = CoreWifiSnapshotPort(wifiSnapshot),
             transport = AndroidAuthTransportFactory.create(),
-            portalProvider = DefaultPortalProvider
+            portalProvider = portalProviderFrom(appContext)
         )
         val coordinator = AuthWorkCoordinator(
             flow = flow,

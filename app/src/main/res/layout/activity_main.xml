@@ -141,5 +141,27 @@
             android:layout_height="wrap_content"
             android:text="@string/btn_login_now" />
 
+        <!-- 元素 10：Portal（门户）地址 —— 不同校区地址不同，用户可自行输入并保存（持久化，优先于代码默认值）。
+             追加在末尾（index=10），原有 1..9 元素的顺序与编号一律不变。 -->
+        <TextView
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="@string/label_portal" />
+
+        <EditText
+            android:id="@+id/edit_portal"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:hint="@string/hint_portal"
+            android:inputType="textUri"
+            android:maxLines="1" />
+
+        <Button
+            android:id="@+id/btn_save_portal"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/btn_save_portal" />
+
     </LinearLayout>
 </ScrollView>

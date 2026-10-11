@@ -44,4 +44,10 @@
 
     <!-- 元素 9：立即登录 -->
     <string name="btn_login_now">立即登录</string>
+
+    <!-- 元素 10：Portal（门户）地址（不同校区地址不同，可自行输入并保存） -->
+    <string name="label_portal">Portal 地址（校园网门户，按校区填写）</string>
+    <string name="hint_portal">如 202.194.116.116（可带 http:// 前缀）</string>
+    <string name="btn_save_portal">保存 Portal 地址</string>
+    <string name="save_portal_done">已保存 Portal 地址：%1$s</string>
 </resources>

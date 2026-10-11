@@ -7,6 +7,8 @@ import top.ytu.srunautologin.net.WifiCapability
 import top.ytu.srunautologin.net.WifiPermissionState
 import top.ytu.srunautologin.storage.Carrier
 import top.ytu.srunautologin.storage.Credential
+import top.ytu.srunautologin.storage.KeyValueStore
+import top.ytu.srunautologin.storage.PortalConfig
 
 /**
  * 配置界面的纯逻辑层（不引用任何 Android View/Context，可离线测试）。
@@ -21,6 +23,7 @@ import top.ytu.srunautologin.storage.Credential
  *  7. 保存 → [ConfigViewModel.save]（写入 credentialRepository + wifiAccountMap）
  *  8. [ConfigUiState.statusText]      状态显示区（成功/失败原因/时间，失败不静默）
  *  9. 立即登录 → [ConfigViewModel.loginNow]
+ * 10. [ConfigUiState.portalInput]     Portal（门户）地址输入框 → [ConfigViewModel.savePortal]
  */
 
 /** 登录方式选项（与已冻结的 [Carrier] 取值一一对应）。 */
@@ -49,6 +52,14 @@ data class SavePlan(
 sealed interface SaveOutcome {
     data class Saved(val plan: SavePlan) : SaveOutcome
     data class Invalid(val message: String) : SaveOutcome
+}
+
+/** Portal 地址保存结果（非法输入给出可见提示，不静默接受）。 */
+sealed interface PortalSaveOutcome {
+    /** @param portal 规范化之后的 Portal 基地址（形如 `http://202.194.116.116`）。 */
+    data class Saved(val portal: String) : PortalSaveOutcome
+
+    data class Invalid(val message: String) : PortalSaveOutcome
 }
 
 /** 密码输入框的内容统一口径（Trim 去首尾空白）。 */
@@ -91,6 +102,8 @@ data class ConfigUiState(
     val statusOk: Boolean = false,
     val lastResult: AuthResult? = null,
     val lastAttemptAtMillis: Long = 0L,
+    /** 元素 10：Portal（门户）地址输入框的当前文本（保存时校验并持久化）。 */
+    val portalInput: String = PortalConfig.DEFAULT_PORTAL,
     val busy: Boolean = false
 ) {
     val carrier: CarrierOption get() = CarrierOption.entries[carrierIndex.coerceIn(0, CarrierOption.entries.size - 1)]
@@ -142,6 +155,11 @@ interface LoginTrigger {
 class ConfigViewModel(
     private val wifi: WifiUiPort,
     private val loginTrigger: LoginTrigger = LoginTrigger.NOOP,
+    /**
+     * Portal 地址配置存储（可空：纯逻辑离线用例可不注入，此时按代码默认值工作）。
+     * **本类不直接碰 SharedPreferences/Context** —— 真机由 Activity 在 onCreate 之后注入。
+     */
+    private val portalStore: KeyValueStore? = null,
     private val clock: () -> Long = { System.currentTimeMillis() }
 ) {
 
@@ -149,7 +167,9 @@ class ConfigViewModel(
         labelInput = CarrierOption.YTU.displayName,
         permissionState = wifi.permissionState(),
         capability = wifi.capability(),
-        rationaleText = wifi.explainText
+        rationaleText = wifi.explainText,
+        // 用户保存的值优先；缺失/非法时回落到代码默认值（PortalConfig.DEFAULT_PORTAL）
+        portalInput = portalInitialInput(portalStore)
     )
         private set
 
@@ -162,6 +182,50 @@ class ConfigViewModel(
     fun setPassword(value: String): ConfigUiState = update { it.copy(passwordInput = value) }
 
     fun setLabel(value: String): ConfigUiState = update { it.copy(labelInput = value, labelTouched = true) }
+
+    /* ------------------------- 元素 10：Portal 地址 ------------------------- */
+
+    /** 输入框文本变化 → 写回状态（校验与持久化在 [savePortal] 里做，不在文本监听里做）。 */
+    fun setPortal(value: String): ConfigUiState = update { it.copy(portalInput = value) }
+
+    /**
+     * 保存 Portal 地址：校验 → 写入键值存储 → 状态区给出可见反馈。
+     *
+     * 关键约定：
+     *  - **非法输入不写脏值、不覆盖已保存的旧值**，返回 [PortalSaveOutcome.Invalid] 并把原因写进状态区；
+     *  - 存储缺失（离线纯逻辑用例）时返回失败提示，**不静默假装已保存**；
+     *  - 归一化（去空白 / 去尾斜杠 / 补 `http://`）由已冻结的
+     *    [top.ytu.srunautologin.auth.SrunRequestBuilder.normalizePortal] 权威实现完成，本层不重复实现。
+     */
+    fun savePortal(): PortalSaveOutcome {
+        val raw = state.portalInput
+        val invalid = validatePortalInput(raw)
+        if (invalid != null) {
+            update { it.copy(statusText = invalid, statusOk = false) }
+            return PortalSaveOutcome.Invalid(invalid)
+        }
+        val store = portalStore
+            ?: run {
+                val msg = "保存失败：Portal 地址存储不可用（未注入 KeyValueStore）"
+                update { it.copy(statusText = msg, statusOk = false) }
+                return PortalSaveOutcome.Invalid(msg)
+            }
+        val saved = PortalConfig.write(store, raw)
+            ?: run {
+                val msg = "保存失败：Portal 地址非法（$raw），已保留原值"
+                update { it.copy(statusText = msg, statusOk = false) }
+                return PortalSaveOutcome.Invalid(msg)
+            }
+        // 把规范化后的地址回填到状态（界面同步显示 http://主机 形态）
+        update {
+            it.copy(
+                portalInput = saved,
+                statusText = "已保存 Portal 地址：$saved（重启应用后仍然生效）",
+                statusOk = true
+            )
+        }
+        return PortalSaveOutcome.Saved(saved)
+    }
 
     /* ------------------------- 元素 3：登录方式二选一 ------------------------- */
 
@@ -336,6 +400,23 @@ class ConfigViewModel(
         if (cap.degraded) "降级提示：${cap.degradedReason}" else ""
 
     companion object {
+        /**
+         * 输入框初值：优先显示用户已保存的值（经校验规范化），否则显示代码默认值。
+         * 存储里的值若非法（历史脏数据），按「缺失」处理并回落到默认值——界面绝不显示一个保存必失败的值。
+         */
+        fun portalInitialInput(store: KeyValueStore?): String = PortalConfig.read(store)
+
+        /** 保存前的可见校验：返回 null 表示合法；否则返回给用户看的原因（含原始输入）。 */
+        fun validatePortalInput(raw: String): String? {
+            val trimmed = raw.trim()
+            if (trimmed.isEmpty()) return "Portal 地址不能为空（示例：${PortalConfig.DEFAULT_PORTAL}）"
+            if (trimmed.any { it.isWhitespace() }) return "Portal 地址中间不能有空格：$trimmed"
+            if (PortalConfig.normalize(trimmed) == null) {
+                return "Portal 地址非法：$trimmed（只支持主机名或 IPv4，可带 http:// 前缀，不要带路径）"
+            }
+            return null
+        }
+
         /** 状态区文本格式：`[时间] 成功/失败原因`（失败不静默）。 */
         fun formatStatus(result: AuthResult, atMillis: Long): String {
             val time = formatTime(atMillis)

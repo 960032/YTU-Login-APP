@@ -22,6 +22,7 @@ import top.ytu.srunautologin.flow.AuthFlowOutcome
 import top.ytu.srunautologin.flow.CoreWifiSnapshotPort
 import top.ytu.srunautologin.flow.MapWifiAccountLookup
 import top.ytu.srunautologin.flow.RepositoryCredentialLookup
+import top.ytu.srunautologin.flow.StoredPortalProvider
 import top.ytu.srunautologin.net.WifiPermissionPolicy
 import top.ytu.srunautologin.net.WifiPermissionRequestOutcome
 import top.ytu.srunautologin.net.WifiPermissionState
@@ -62,6 +63,19 @@ class MainActivity : Activity() {
     private lateinit var textStatus: TextView
     private lateinit var btnLoginNow: Button
     private lateinit var editNewSsid: EditText
+    private lateinit var editPortal: EditText
+    private lateinit var btnSavePortal: Button
+
+    /**
+     * Portal 地址配置存储（元素 10）。
+     *
+     * **crashfix2 约束**：`SrunStorage.keyValueStore(this)` 内部会取
+     * `context.applicationContext`（AndroidWiring.kt:233 → SharedPreferences），
+     * 而这在 `MainActivity.<init>` 阶段不可用（Activity 尚未 attach，mBase 为 null → NPE）。
+     * 因此这里用 `by lazy`：求值推迟到 `onCreate` 内 `bindViews()` 首次访问时，那时 Activity 已 attach。
+     * **不允许**把 `SrunStorage.keyValueStore(...)` 直接写成 `val` 实例属性初始化器。
+     */
+    private val portalStore by lazy { SrunStorage.keyValueStore(this) }
 
     /**
      * 权限端口：把系统 Activity 能力暴露给 ViewModel；顺序由 ViewModel 强制执行。
@@ -139,7 +153,7 @@ class MainActivity : Activity() {
         super.onCreate(savedInstanceState)
         setContentView(R.layout.activity_main)
 
-        // 说明（crashfix1 任务 A）：setContentView + 下面这 13 个 findViewById **故意留在 try 之外**。
+        // 说明（crashfix1 任务 A）：setContentView + 下面这 15 个 findViewById **故意留在 try 之外**。
         // 依据 artifacts/crash-audit1/audit-report.md：布局与 id 已逐个核对匹配，这段调用不依赖权限、
         // 不访问磁盘、不取系统服务，不在「可能抛异常」的清单里；把它们一起包住只会掩盖布局类错误。
         editUsername = findViewById(R.id.edit_username)
@@ -154,6 +168,8 @@ class MainActivity : Activity() {
         textStatus = findViewById(R.id.text_status)
         btnLoginNow = findViewById(R.id.btn_login_now)
         editNewSsid = findViewById(R.id.edit_new_ssid)
+        editPortal = findViewById(R.id.edit_portal)
+        btnSavePortal = findViewById(R.id.btn_save_portal)
 
         // 启动兜底（crashfix1 任务 A）：这条同步栈上有 8 处系统调用（getSharedPreferences /
         // checkSelfPermission / getSystemService / getScanResults / getConnectionInfo），
@@ -210,7 +226,7 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 认证链路装配：存储（已冻结）+ WiFi 快照（已冻结）+ 认证客户端（本任务新增）。 */
+    /** 认证链路装配：存储（已冻结）+ WiFi 快照（已冻结）+ 认证客户端 + **Portal 地址（可配置）**。 */
     private fun buildAuthFlow() {
         authFlow = AuthFlow(
             credentials = RepositoryCredentialLookup(SrunStorage.credentialRepository(this)),
@@ -218,12 +234,18 @@ class MainActivity : Activity() {
             wifiSnapshot = CoreWifiSnapshotPort(
                 WifiSnapshotCore(AndroidWifiSource(this), AndroidWifiPermissionFlow(this))
             ),
-            transport = SrunAuthClient()
+            transport = SrunAuthClient(),
+            // 元素 10：Portal 地址来自持久化配置（用户保存值优先，缺失回落 DEFAULT_PORTAL）。
+            // 用「工厂函数」而不是在这里直接调用 SrunStorage.keyValueStore(this)：
+            // 取值时机推迟到 AuthFlow.run() 真正调用 portal() 时。以工厂函数（而非 lambda 对象）持有
+            // Activity，避免把 this 捕获进闭包（否则会有 Activity 泄漏风险）。
+            portalProvider = StoredPortalProvider(AuthFlowFactory.portalStore(this))
         )
     }
 
     private fun buildViewModel() {
-        viewModel = ConfigViewModel(wifiUiPort, loginTrigger)
+        // portalStore 在此首次访问 → 触发 by lazy 求值；此时 onCreate 已执行，Activity 已 attach
+        viewModel = ConfigViewModel(wifiUiPort, loginTrigger, portalStore)
         spinnerCarrier.adapter = ArrayAdapter(
             this,
             android.R.layout.simple_spinner_item,
@@ -284,6 +306,21 @@ class MainActivity : Activity() {
                     render()
                 }
                 .show()
+        }
+
+        // 元素 10：Portal 地址（读当前配置值填入输入框；保存时持久化到键值存储）
+        editPortal.setText(viewModel.state.portalInput)
+        editPortal.addTextChangedListener(SimpleTextWatcher { viewModel.setPortal(it) })
+        btnSavePortal.setOnClickListener {
+            when (val outcome = viewModel.savePortal()) {
+                is PortalSaveOutcome.Invalid -> toast(outcome.message)
+                is PortalSaveOutcome.Saved -> {
+                    // 规范化后的地址回填输入框（避免与已保存值不一致）
+                    if (editPortal.text.toString() != outcome.portal) editPortal.setText(outcome.portal)
+                    toast(getString(R.string.save_portal_done, outcome.portal))
+                }
+            }
+            render()
         }
 
         // 元素 7：保存（写入已冻结的存储）
@@ -378,6 +415,19 @@ class MainActivity : Activity() {
         /** 启动崩溃落盘文件名（位于应用私有目录 files/）。 */
         const val CRASH_FILE = "crash-startup.txt"
     }
+}
+
+/**
+ * Portal 存储工厂（**故意的间接层**）。
+ *
+ * `AuthFlow` 的构造发生在 `onCreate` 的 `buildAuthFlow()` 里，而 `SrunStorage.keyValueStore(context)`
+ * 需要 Activity 已 attach。若把 `SrunStorage.keyValueStore(this)` 直接写在 `AuthFlow(...)` 的参数位，
+ * 求值时刻与写成实例属性初始化器是一样的风险面（都在 Activity 尚未 attach 或刚 attach 的边缘）。
+ * 因此统一走这里：**只有真正调用 `portalStore(activity)` 时才取存储**，且以「函数调用」而非
+ * lambda 对象的形式持参（避免闭包捕获 Activity）。离线核对见 artifacts/portal-config1/。
+ */
+private object AuthFlowFactory {
+    fun portalStore(activity: Activity) = SrunStorage.keyValueStore(activity)
 }
 
 /** 极简 TextWatcher（避免匿名对象样板）。 */

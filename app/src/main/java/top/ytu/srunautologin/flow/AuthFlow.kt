@@ -50,7 +50,8 @@ interface WifiSnapshotPort {
  *
  * 注意：本应用**不硬编码本机 IP**——请求中的 ip 字段由认证客户端从
  * get_challenge 响应的 client_ip 取得，取不到时才用 Socket.localAddress 探测；
- * 这里的 portal 只是「门户主机地址」，真机可由用户在高级设置中覆盖。
+ * 这里的 portal 只是「门户主机地址」，由用户在配置界面填写并持久化
+ * （实现见 [StoredPortalProvider]，默认值见 [AuthFlow.DEFAULT_PORTAL]）。
  */
 interface PortalProvider {
     fun portal(): String
@@ -203,10 +204,16 @@ class AuthFlow(
     }
 
     companion object {
-        /** 默认 Portal 主机（烟台大学校园网 SRun 门户；真机可由用户在高级设置中覆盖）。 */
-        const val DEFAULT_PORTAL: String = "172.16.0.1"
+        /**
+         * 默认 Portal 主机（烟台大学 SRun 门户，已用参考脚本实测可用）。
+         *
+         * 用户可在配置界面的 Portal 地址输入框中覆盖；覆盖值存于键值存储，
+         * 生效优先序：**用户保存的值 > 本默认值**（见 `storage/PortalConfig.kt`）。
+         * 本常量保持唯一字面量来源，其它地方不得再写字面量地址。
+         */
+        const val DEFAULT_PORTAL: String = "202.194.116.116"
 
-        /** 使用默认 Portal 的 [PortalProvider]。 */
+        /** 使用默认 Portal 的 [PortalProvider]（无配置存储时的兜底；真机用 [StoredPortalProvider]）。 */
         val defaultPortalProvider: PortalProvider = object : PortalProvider {
             override fun portal(): String = DEFAULT_PORTAL
         }

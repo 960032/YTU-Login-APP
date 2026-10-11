@@ -17,6 +17,9 @@ import top.ytu.srunautologin.net.WifiPermissionState
  *  7 | 保存         | Button    | id=btn_save
  *  8 | 状态显示区    | TextView  | id=text_status
  *  9 | 立即登录      | Button    | id=btn_login_now
+ * 10 | Portal 地址   | EditText + Button | id=edit_portal / id=btn_save_portal
+ *    （门户地址可配置：不同校区地址不同，用户填的值持久化并优先于代码默认值；
+ *      index 追加在末尾，**原有 1..9 的编号与含义一律不变**，见 ClientChecks UI-1 的下界断言）
  */
 object UiSpec {
 
@@ -30,7 +33,8 @@ object UiSpec {
         UiElement(6, "权限说明与申请", "TextView+Button", "text_permission_notice/btn_request_permission", "权限策略"),
         UiElement(7, "保存", "Button", "btn_save", "B2"),
         UiElement(8, "状态显示区", "TextView", "text_status", "B5"),
-        UiElement(9, "立即登录", "Button", "btn_login_now", "B5/B8")
+        UiElement(9, "立即登录", "Button", "btn_login_now", "B5/B8"),
+        UiElement(10, "Portal 地址（门户地址可配置）", "EditText+Button", "edit_portal/btn_save_portal", "用户需求：地址可配置")
     )
 
     /** 状态区必须能表达的信息类别（B5：成功/失败原因/时间）。 */
