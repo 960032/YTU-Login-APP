@@ -1,0 +1,25 @@
+# 说明：gradle-wrapper.jar / gradlew / gradlew.bat 未随本骨架提供（本机无网络，无法生成官方 wrapper 引导文件）。
+# 补齐方式（有网络时）：在 android-app/ 下执行 `gradle wrapper --gradle-version 9.4.0`。
+*.iml
+.gradle/
+/local.properties
+/.idea/
+.DS_Store
+build/
+captures/
+.externalNativeBuild/
+.cxx/
+
+# --- 隐私/凭据与构建产物（隐私清理轮次补全；详细说明见 PRIVACY-NOTICE.md）---
+# 本文件只对 artifacts/android-app/ 子树生效，不覆盖整个仓库：
+# 若把整个工作区纳入 git，必须在仓库根目录 .gitignore 中另行排除 artifacts/srun-impl/config.json（该文件含用户真实账号与明文密码）。
+# 本地凭据文件（用户个人文件，绝不提交）
+#   /local.properties 与 /.idea/ 已在上方按根目录锚定忽略，此处不再重复。
+config.json
+# 构建产物与签名材料
+*.apk
+*.aab
+*.keystore
+*.jks
+*.hprof
+output.json

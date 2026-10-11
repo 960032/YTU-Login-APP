@@ -1,0 +1,18 @@
+自检: 参考实现 base64Encode("Ā") 抛出 -> INVALID_CHARACTER_ERR: DOM Exception 5
+自检: 参考实现 base64Encode("你好") 抛出 -> INVALID_CHARACTER_ERR: DOM Exception 5
+自检: 参考实现 base64Encode("😀") 抛出 -> INVALID_CHARACTER_ERR: DOM Exception 5
+自检: 参考实现 base64Encode("abĀ") 抛出 -> INVALID_CHARACTER_ERR: DOM Exception 5
+参考实现 sha256 = 1A56E0EA990F98E6D2A7E0F4A914FCBCEED86B7A52B0F6094EF076FEFD424FE6  （与基准一致）
+node v24.15.0
+输出文件 = F:\Program\Harness_Workspace\YTU校园网\artifacts\android-app\testvectors\vectors.json
+  md5: 6 条
+  sha1: 6 条
+  hmacMd5: 9 条
+  base64Encode: 15 条
+  passwordField: 6 条
+  chksum: 5 条
+  infoField: 5 条
+总向量条数 = 52
+抽样 md5("") = d41d8cd98f00b204e9800998ecf8427e
+抽样 base64Encode("") = ""
+抽样 infoField(合成账号) = {SRBX1}alJEaYjZ+qhvHtuGTMVlItcSSgb5d2FgQHB33372iPjC+Ke2KN+R5k0XgLizZ9Un80tvezRyd7PQbA878B7w/HxGi7+zz3tlVjDPegv4RjoaExKLCoCHj+592Mab/9fC0xq2/4r5yh9xZQUTgDmHSZcSnf+=
