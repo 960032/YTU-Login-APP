@@ -63,42 +63,75 @@ class MainActivity : Activity() {
     private lateinit var btnLoginNow: Button
     private lateinit var editNewSsid: EditText
 
-    /** 权限端口：把系统 Activity 能力暴露给 ViewModel；顺序由 ViewModel 强制执行。 */
-    private val permissionPort = object : PermissionPort {
-        private val flow = AndroidWifiPermissionFlow(this@MainActivity)
+    /**
+     * 权限端口：把系统 Activity 能力暴露给 ViewModel；顺序由 ViewModel 强制执行。
+     *
+     * **crashfix2：必须 `by lazy`（延迟到首次访问）** —— 原来是构造期求值的
+     * `private val permissionPort = object : PermissionPort { ... }`，它内部的
+     * `AndroidWifiPermissionFlow(this@MainActivity)`（下一行）会在 **MainActivity.<init>** 阶段执行
+     * `context.applicationContext`（AndroidWiring.kt 中 `AndroidWifiPermissionFlow.<init>` 的
+     * `private val appContext = context.applicationContext`）。那一刻 `Activity.attachBaseContext()`
+     * 还没跑，Activity 这个 ContextWrapper 的 mBase 仍为 null，于是
+     * `ContextWrapper.getApplicationContext()` 抛 NPE。真机 logcat 链路（逐字）：
+     *   MainActivity.<init>(MainActivity.kt:65) → MainActivity$permissionPort$1.<init>(MainActivity.kt:66)
+     *   → AndroidWifiPermissionFlow.<init>(AndroidWiring.kt:119) → ContextWrapper.getApplicationContext
+     * 改成 `by lazy`（默认 SYNCHRONIZED，线程安全）后，求值推迟到 `onCreate` 内 `buildViewModel()`
+     * 首次访问本属性时——那时 Activity 已 attach，`applicationContext` 可用，NPE 消除。
+     * 注意：访问时机与改前一致（仍是 onCreate 里），只是**求值时刻**从构造期挪到了那一刻。
+     */
+    private val permissionPort: PermissionPort by lazy {
+        object : PermissionPort {
+            private val flow = AndroidWifiPermissionFlow(this@MainActivity)
 
-        override val explainText: String get() = flow.explainText
+            override val explainText: String get() = flow.explainText
 
-        override fun requiredPermissions(): List<String> = flow.requiredPermissions()
+            override fun requiredPermissions(): List<String> = flow.requiredPermissions()
 
-        override fun state(): WifiPermissionState = flow.state()
+            override fun state(): WifiPermissionState = flow.state()
 
-        override fun markRationaleShown() = flow.markRationaleShown()
+            override fun markRationaleShown() = flow.markRationaleShown()
 
-        override fun onRequestResult(outcome: WifiPermissionRequestOutcome): WifiPermissionState =
-            flow.onRequestResult(outcome)
+            override fun onRequestResult(outcome: WifiPermissionRequestOutcome): WifiPermissionState =
+                flow.onRequestResult(outcome)
 
-        /** 能力降级原因：与 PermissionUiAdapter.capability() 同源（都来自 WifiPermissionPolicy.capability）。 */
-        override fun capabilityDegradedReason(): String? =
-            WifiPermissionPolicy.capability(flow.state()).degradedReason
+            /** 能力降级原因：与 PermissionUiAdapter.capability() 同源（都来自 WifiPermissionPolicy.capability）。 */
+            override fun capabilityDegradedReason(): String? =
+                WifiPermissionPolicy.capability(flow.state()).degradedReason
 
-        override fun requestPermissions() {
-            ActivityCompatBridge.request(this@MainActivity, flow.requiredPermissions())
+            override fun requestPermissions() {
+                ActivityCompatBridge.request(this@MainActivity, flow.requiredPermissions())
+            }
         }
     }
 
-    private val wifiUiPort: WifiUiPort = object : PermissionUiAdapter(permissionPort) {
-        private val core = WifiSnapshotCore(
-            AndroidWifiSource(this@MainActivity),
-            AndroidWifiPermissionFlow(this@MainActivity)
-        )
+    /**
+     * WiFi 列表端口。**crashfix2：同样必须 `by lazy`** —— 原为构造期求值，它有三条构造期路径会撞同一个 NPE：
+     *  1) 父类构造参数 `PermissionUiAdapter(permissionPort)` 求值 → 立即初始化 permissionPort → 同上；
+     *  2) 类体属性 `AndroidWifiSource(this@MainActivity)` 构造期执行 `context.applicationContext`；
+     *  3) 类体属性 `AndroidWifiPermissionFlow(this@MainActivity)` 构造期执行 `context.applicationContext`。
+     * `by lazy` 后整棵对象图（端口 + WifiSnapshotCore + 两个 Android 边界实现）都推迟到 onCreate
+     * 首次访问时构建，此时 Activity 已 attach。
+     */
+    private val wifiUiPort: WifiUiPort by lazy {
+        object : PermissionUiAdapter(permissionPort) {
+            private val core = WifiSnapshotCore(
+                AndroidWifiSource(this@MainActivity),
+                AndroidWifiPermissionFlow(this@MainActivity)
+            )
 
-        override fun currentSsid(): String? = core.currentSsid()
+            override fun currentSsid(): String? = core.currentSsid()
 
-        override fun scanSsidList(): List<String> = core.scanSsidList()
+            override fun scanSsidList(): List<String> = core.scanSsidList()
+        }
     }
 
-    private val loginTrigger = object : LoginTrigger {
+    /**
+     * 立即登录触发器。**crashfix2 排查结论：无风险，保持原样、不加 `by lazy`** ——
+     * 构造期只创建一个匿名对象（不触碰 Context / 系统服务 / 资源）；它对 `authFlow` 的引用只出现在
+     * `login()` 的**方法体**内，而 `authFlow` 是 `lateinit var`（构造期没有初值，:51），
+     * 到「立即登录」被点击时才读取。构造期求值的是「对象本身」，不是方法体。
+     */
+    private val loginTrigger: LoginTrigger = object : LoginTrigger {
         override fun login(targetSsid: String?): AuthFlowOutcome = authFlow.run(targetSsid)
     }
 
