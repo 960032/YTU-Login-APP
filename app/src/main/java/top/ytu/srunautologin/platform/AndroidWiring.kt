@@ -6,6 +6,7 @@ import android.net.wifi.WifiManager
 import android.os.Build
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
+import android.util.Log
 import top.ytu.srunautologin.net.DefaultWifiPermissionFlow
 import top.ytu.srunautologin.net.WifiCapability
 import top.ytu.srunautologin.net.WifiPermissionFlow
@@ -31,6 +32,11 @@ import javax.crypto.SecretKey
  * 其中所有可验证的逻辑都已抽到纯 JVM 的 storage/ 与 net/ 包，并已离线跑通测试。
  * ==============================================================================
  */
+
+/**
+ * 统一日志 TAG：本文件所有 Log.* 调用共用（原先由各内部类各自持有 private TAG，导致同类外作用域落空）。
+ */
+private const val TAG = "SrunAutoLogin"
 
 /**
  * KEK 的来源：Android Keystore（密钥不出安全硬件/应用沙箱，不落盘为明文）。
@@ -111,10 +117,6 @@ class SharedPreferencesKeyValueStore(
     } catch (e: RuntimeException) {
         Log.e(TAG, "枚举 SharedPreferences 键失败，按空集处理", e)
         emptySet()
-    }
-
-    private companion object {
-        const val TAG = "SrunAutoLogin"
     }
 }
 
@@ -201,8 +203,6 @@ class AndroidWifiPermissionFlow(context: Context) : WifiPermissionFlow {
             WifiPermissionPolicy.ACCESS_COARSE_LOCATION,
             WifiPermissionPolicy.NEARBY_WIFI_DEVICES
         )
-
-        const val TAG = "SrunAutoLogin"
     }
 }
 
