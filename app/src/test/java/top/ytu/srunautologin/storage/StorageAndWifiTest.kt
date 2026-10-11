@@ -78,8 +78,15 @@ class StorageAndWifiTest {
     fun b7_persistedBytesContainNoPlaintextPassword() {
         val repo = CredentialRepository(store(), InMemoryKeyValueStore())
         repo.upsert(Credential(label, "20230000000", password, Carrier.CMCC, Carrier.AC_ID))
-        val bytes = repo.persistedBlobBytes() ?: fail("未产生落盘数据")!!
-        assertFalse("落盘字节包含明文密码", contains(bytes, password.toByteArray(Charsets.UTF_8)))
+        // 【编译错误修复】原写法 `repo.persistedBlobBytes() ?: fail("未产生落盘数据")!!`：
+        // JUnit 的 fail(String) 是 Java void 方法（Kotlin 侧为 Unit），elvis 表达式
+        // `ByteArray? ?: Unit` 的公共超类型被推断为 Any，bytes 的类型随之成为 Any，
+        // 到下一行把它当 ByteArray 传参时才在调用点报
+        // "Argument type mismatch: actual type is 'Any', but 'ByteArray' was expected"（CI 报错 82:44 即此实参）。
+        // 改为 `run { fail(...); error(...) }`：分支末端是 Nothing 类型，elvis 结果类型回到 ByteArray；
+        // fail(...) 的调用与失败信息逐字保留，断言语义未变。
+        val bytes = repo.persistedBlobBytes() ?: run { fail("未产生落盘数据"); error("unreachable: fail 未抛出") }
+        assertFalse("落盘字节包含明文密码", byteArrayContains(bytes, password.toByteArray(Charsets.UTF_8)))
     }
 
     /** B3：WiFi ↔ 账号映射持久化，重启（新建实例读同一份存储）后仍在。 */
@@ -120,7 +127,9 @@ class StorageAndWifiTest {
         assertTrue("核对项过少（${items.size}）", items.size >= 27)
     }
 
-    private fun contains(hay: ByteArray, needle: ByteArray): Boolean {
+    /** 字节序列包含判定。函数名刻意避开 Kotlin 内建的 `ByteArray.contains(element: Byte)`，
+     *  以免读者/后续修改把它误当成内建成员方法（与本次编译错误无因果关系，属防御性改名）。 */
+    private fun byteArrayContains(hay: ByteArray, needle: ByteArray): Boolean {
         outer@ for (i in 0..(hay.size - needle.size)) {
             for (j in needle.indices) if (hay[i + j] != needle[j]) continue@outer
             return true

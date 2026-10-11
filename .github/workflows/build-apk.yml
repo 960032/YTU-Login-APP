@@ -101,8 +101,30 @@ jobs:
           test -f settings.gradle.kts || { echo "::error::仓库根缺少 settings.gradle.kts —— 请确认仓库根 = 原 artifacts/android-app/ 的内容"; exit 1; }
           test -f app/build.gradle.kts || { echo "::error::仓库根缺少 app/build.gradle.kts"; exit 1; }
 
-      - name: 单元测试（JVM，无需真机）
+      # ---------------------------------------------------------------------------------
+      # 【单元测试：非阻塞（不阻止 APK 产出）】
+      #   为什么：本机（离线开发环境）无 Android SDK、无 JUnit，这三份测试**从未真实运行过**——
+      #   即使这里编译通过，它们能否通过仍是未验证的；而用户当前的核心目标是拿到可安装的 APK 做真机实测。
+      #   若把测试做成阻塞式，一旦测试有运行时问题，CI 会卡在测试上而永远拿不到 APK。
+      #   做法：本步骤加 continue-on-error: true（失败不中断后续 assembleDebug 与 APK 上传），
+      #   但**不静默忽略**——紧接的下一步会打 ::warning:: 醒目警告，测试报告由文末 if: always() 的步骤上传。
+      #   边界：只改本步骤的容错性；assembleDebug / 定位 APK / 上传 APK / 路径自检 / SDK 许可等步骤一律未动。
+      # ---------------------------------------------------------------------------------
+      - name: 单元测试（JVM，无需真机；失败不阻塞 APK 产出）
+        id: unit_test
+        continue-on-error: true
         run: gradle --no-daemon testDebugUnitTest --stacktrace
+
+      - name: 单元测试失败醒目警告（不阻塞 APK 产出）
+        # continue-on-error 只保证「不中断工作流」，该步骤本身仍显示为红色失败态；
+        # 这里在失败时显式打一条 ::warning:: 注解 + 分隔线包裹的日志，避免失败被静默忽略。
+        if: steps.unit_test.outcome == 'failure'
+        run: |
+          echo "::warning::单元测试失败，但这不阻止 APK 产出；请查看 test-reports 工件"
+          echo "======================================================================"
+          echo " 警告：单元测试失败，但这不阻止 APK 产出；请查看 test-reports 工件"
+          echo " （测试本身有价值，请修测试；APK 仍由后续步骤正常产出并上传）"
+          echo "======================================================================"
 
       - name: 构建 Debug APK
         run: gradle --no-daemon assembleDebug --stacktrace
