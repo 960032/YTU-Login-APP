@@ -19,13 +19,13 @@ import top.ytu.srunautologin.auth.SrunAuthClient
 import top.ytu.srunautologin.flow.AuthFlow
 import top.ytu.srunautologin.flow.AuthFlowOutcome
 import top.ytu.srunautologin.flow.CoreWifiSnapshotPort
-import top.ytu.srunautologin.flow.LoginTrigger
 import top.ytu.srunautologin.flow.MapWifiAccountLookup
 import top.ytu.srunautologin.flow.RepositoryCredentialLookup
-import top.ytu.srunautologin.net.AndroidWifiPermissionFlow
+import top.ytu.srunautologin.net.WifiPermissionPolicy
 import top.ytu.srunautologin.net.WifiPermissionRequestOutcome
 import top.ytu.srunautologin.net.WifiPermissionState
 import top.ytu.srunautologin.net.WifiSnapshotCore
+import top.ytu.srunautologin.platform.AndroidWifiPermissionFlow
 import top.ytu.srunautologin.platform.AndroidWifiSource
 import top.ytu.srunautologin.platform.SrunStorage
 
@@ -75,6 +75,10 @@ class MainActivity : Activity() {
 
         override fun onRequestResult(outcome: WifiPermissionRequestOutcome): WifiPermissionState =
             flow.onRequestResult(outcome)
+
+        /** 能力降级原因：与 PermissionUiAdapter.capability() 同源（都来自 WifiPermissionPolicy.capability）。 */
+        override fun capabilityDegradedReason(): String? =
+            WifiPermissionPolicy.capability(flow.state()).degradedReason
 
         override fun requestPermissions() {
             ActivityCompatBridge.request(this@MainActivity, flow.requiredPermissions())

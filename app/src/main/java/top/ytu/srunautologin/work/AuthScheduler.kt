@@ -78,9 +78,8 @@ class AndroidAuthScheduler(
             .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
             .setPersisted(true)
             .setBackoffCriteria(
-                JobInfo.BACKOFF_POLICY_EXPONENTIAL,
-                JobInfo.MIN_BACKOFF_MILLIS,
-                java.util.concurrent.TimeUnit.MILLISECONDS
+                JobInfo.DEFAULT_INITIAL_BACKOFF_MILLIS,
+                JobInfo.BACKOFF_POLICY_EXPONENTIAL
             )
             .build()
         return try {
@@ -107,9 +106,8 @@ class AndroidAuthScheduler(
             .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
             .setPersisted(true)
             .setBackoffCriteria(
-                JobInfo.BACKOFF_POLICY_EXPONENTIAL,
-                JobInfo.MIN_BACKOFF_MILLIS,
-                java.util.concurrent.TimeUnit.MILLISECONDS
+                JobInfo.DEFAULT_INITIAL_BACKOFF_MILLIS,
+                JobInfo.BACKOFF_POLICY_EXPONENTIAL
             )
             .build()
         return try {

@@ -2,6 +2,7 @@ package top.ytu.srunautologin.work
 
 import android.app.job.JobParameters
 import android.app.job.JobService
+import android.content.Context
 import top.ytu.srunautologin.flow.AuthFlow
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
@@ -85,8 +86,11 @@ class AuthJobService : JobService() {
         /**
          * 同步执行一次认证（供前台「立即登录」复用同一装配，不经过 JobScheduler）。
          * 超时返回 [RunOutcome.WAITING] 的结果，绝不返回 null。
+         *
+         * @param context 调用方提供的 Context。companion 作用域里既没有 Service 实例，
+         *        也没有静态 applicationContext，所以必须由调用方显式传入（内部只用 applicationContext）。
          */
-        fun runInline(targetSsid: String?, trigger: TriggerKind): AuthRunResult {
+        fun runInline(context: Context, targetSsid: String?, trigger: TriggerKind): AuthRunResult {
             val latch = CountDownLatch(1)
             var out: AuthRunResult? = null
             val executor = Executors.newSingleThreadExecutor { r ->

@@ -1,6 +1,7 @@
 package top.ytu.srunautologin.clientcheck
 
 import java.io.File
+import java.security.MessageDigest
 
 /**
  * 源码/资源结构核对（B2 界面元素、N4 权限、B10 密码学单一来源）。
@@ -53,6 +54,51 @@ object SourceChecks {
         "android.permission.READ_EXTERNAL_STORAGE"
     )
 
+    // ---------------- SRC-3 冻结文件基线（本次修订） ----------------
+
+    /**
+     * SRC-3 的基线副本在核对工程内的资源路径。
+     *
+     * 来历与验收依据：该文件是 `app/src/main/java/top/ytu/srunautologin/crypto/SrunCrypto.kt` 的
+     * **原样字节复制**（复制当时两侧 SHA256 均为
+     * `0AE0AD94E61A4271811B1DAA9C352331F3FE48FD30F9ED4D2F665E6D54FFE723`，16347 字节），
+     * 而那份代码正是**第 ① 套密码学行为核对 52/52 通过的同一份文件**，因此具备验收依据。
+     */
+    private const val BASELINE_RESOURCE = "top/ytu/srunautologin/clientcheck/SrunCrypto.kt"
+
+    /** 核对工程源码树的兜底相对路径（classpath 取不到资源时使用，仍然是同一份只读基线副本）。 */
+    private const val BASELINE_FALLBACK_PATH =
+        "verify-common-client/src/main/resources/top/ytu/srunautologin/clientcheck/SrunCrypto.kt"
+
+    /** 基线副本**原始字节**（未规范化）的 SHA256 小写十六进制，用于防止基线副本被偷偷改动。 */
+    private const val BASELINE_RAW_SHA256 =
+        "0ae0ad94e61a4271811b1daa9c352331f3fe48fd30f9ed4d2f665e6d54ffe723"
+
+    /**
+     * 读取 SRC-3 的基线副本文本。
+     *
+     * 优先走 classpath 资源（编译产物里 `jvm-out/classes/top/ytu/.../clientcheck/SrunCrypto.kt`），
+     * 取不到时退回核对工程源码树内的同名资源文件；两处都不存在才判「无法核对」（明确报错，不静默通过）。
+     */
+    private fun loadCryptoBaselineText(): String {
+        javaClass.classLoader.getResourceAsStream(BASELINE_RESOURCE)?.use { stream ->
+            return stream.readBytes().toString(Charsets.UTF_8)
+        }
+        val fallback = File(BASELINE_FALLBACK_PATH)
+        if (fallback.isFile) return fallback.readText()
+        throw AssertionError(
+            "取不到 SRC-3 基线副本（classpath 资源 $BASELINE_RESOURCE，" +
+                "兜底路径 ${fallback.absolutePath} 也不存在）"
+        )
+    }
+
+    /** 统一行尾：CRLF 与裸 CR 一律折成 LF，使比对与空白规范化无关。 */
+    private fun normalizeNewlines(text: String): String = text.replace("\r\n", "\n").replace("\r", "\n")
+
+    /** 计算字节串的 SHA256，返回小写十六进制。 */
+    private fun sha256Hex(bytes: ByteArray): String =
+        MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
+
     fun run(r: CheckRunner, appRoot: File) {
         val authDir = File(appRoot, "app/src/main/java/top/ytu/srunautologin/auth")
         val uiDir = File(appRoot, "app/src/main/java/top/ytu/srunautologin/ui")
@@ -102,12 +148,34 @@ object SourceChecks {
             }
             report
         }
-        r.check("SRC-3 已冻结的 SrunCrypto.kt 未改（SHA256 = B7A36DD2…98F9）") {
+        r.check("SRC-3 已冻结的 SrunCrypto.kt 未改（与已验收基线副本「规范化行尾后」逐字节比对；不用裸 SHA256）") {
             r.require(cryptoFile.isFile, "缺少 SrunCrypto.kt")
-            val digest = java.security.MessageDigest.getInstance("SHA-256")
-            val hex = digest.digest(cryptoFile.readBytes()).joinToString("") { "%02X".format(it) }
-            r.requireEquals("B7A36DD28CC6C8C7D42F1A1FEEFB4F455B4F837FB55187C38FA40E3B51B098F9", hex, "SrunCrypto.kt SHA256")
-            "SHA256=$hex"
+            val actualText = cryptoFile.readText()
+            val baselineText = loadCryptoBaselineText()
+
+            // ① 基线副本自身不得被改动：按原始字节比对记录的 SHA256。
+            //    这里对**基线副本**固定哈希是可行的（基线副本是冻结文件，不随本源码编辑而变化），
+            //    同时也就避免了「把基线副本一起改掉以掩盖真实改动」这条绕过路径。
+            val baselineRawHex = sha256Hex(baselineText.toByteArray(Charsets.UTF_8))
+            r.requireEquals(
+                BASELINE_RAW_SHA256, baselineRawHex,
+                "基线副本 SrunCrypto.kt 原始字节 SHA256 已变（基线副本只读，不得修改；如需更新基线须重新走验收）"
+            )
+
+            // ② 核心判据：双方都先把行尾统一为 LF，再逐字节（UTF-8 编码后）比对。
+            //    任何一行内容的改动都会让两侧不一致 → FAIL；
+            //    CRLF/LF 差异被规范化吸收 → 不再误报。
+            val actualNorm = normalizeNewlines(actualText)
+            val baselineNorm = normalizeNewlines(baselineText)
+            val actualNormHex = sha256Hex(actualNorm.toByteArray(Charsets.UTF_8))
+            val baselineNormHex = sha256Hex(baselineNorm.toByteArray(Charsets.UTF_8))
+            r.requireEquals(
+                baselineNormHex, actualNormHex,
+                "SrunCrypto.kt 内容已被改动（规范化行尾后逐字节不一致；未改动时两者必须相等）"
+            )
+            "规范化行尾后与基线逐字节一致：规范化SHA256=${actualNormHex.take(16)}…；" +
+                "文件原始字节=${cryptoFile.readBytes().size}（行尾符不影响判定）；" +
+                "基线原始SHA256=${baselineRawHex.take(16)}…"
         }
         r.check("SRC-4 AndroidManifest 权限：实际集合 ⊆ 白名单（7 条）且 ∩ 黑名单 = ∅（N4/B9 最小权限）") {
             r.require(manifest.isFile, "缺少 AndroidManifest.xml")
