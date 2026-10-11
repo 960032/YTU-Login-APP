@@ -25,6 +25,8 @@
     <string name="label_wifi">WiFi 选择</string>
     <string name="btn_use_current_wifi">用当前连接的 WiFi</string>
     <string name="hint_new_ssid">或手动输入 WiFi 名称</string>
+    <!-- WiFi 列表长度上限（insets-fix1 / B：周边 WiFi 可能上百个，全部渲染会把下方控件推得极远） -->
+    <string name="ssid_list_more">还有 %1$d 个未显示</string>
 
     <!-- 元素 6：权限说明与申请 -->
     <string name="btn_request_permission">申请 WiFi 权限</string>
@@ -34,6 +36,13 @@
     <string name="permission_not_shown">尚未申请 WiFi 权限：列表可能为空，可点下方按钮先查看权限用途说明</string>
     <string name="degraded_prefix">当前处于降级状态</string>
     <string name="degraded_no_list">权限被拒：仅检测当前连接的 WiFi，不显示周边列表</string>
+
+    <!-- 元素 6 的状态行（与说明分开显示，颜色由代码按状态设置） -->
+    <string name="permission_state_unknown">WiFi 权限：尚未申请</string>
+    <string name="permission_state_granted">WiFi 权限：已授权（可显示系统检测到的 WiFi 列表）</string>
+    <string name="permission_state_denied">WiFi 权限：未授权（仅检测当前连接的 WiFi）</string>
+    <string name="permission_state_degraded_suffix">（降级中）</string>
+    <string name="permission_notice_common">该权限用于读取 WiFi 名称，以便自动登录到校园网；不同意时仍可登录已连接的 WiFi。</string>
 
     <!-- 元素 7：保存 -->
     <string name="btn_save">保存账号与 WiFi 绑定</string>
@@ -50,4 +59,12 @@
     <string name="hint_portal">如 202.194.116.116（可带 http:// 前缀）</string>
     <string name="btn_save_portal">保存 Portal 地址</string>
     <string name="save_portal_done">已保存 Portal 地址：%1$s</string>
+
+    <!-- 元素 6 的配色引用（代码按状态覆写：未授权=红、已授权=绿；此处仅作初始值） -->
+    <color name="permission_state_granted_text">#FF2E7D32</color>
+    <color name="permission_state_denied_text">#FFC62828</color>
+    <!-- 降级态单列一色（琥珀 #F57F17），使它既不与「未授权=红」也不与「已授权=绿」混淆 -->
+    <color name="permission_state_degraded_text">#FFF57F17</color>
+    <color name="permission_notice_text">#FF616161</color>
+    <color name="permission_divider">#FFE0E0E0</color>
 </resources>

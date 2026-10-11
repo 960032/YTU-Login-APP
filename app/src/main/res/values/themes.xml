@@ -3,5 +3,15 @@
 <resources>
     <style name="AppTheme" parent="@android:style/Theme.Material.Light">
         <item name="android:windowNoTitle">false</item>
+        <!--
+          insets-fix1（A2 刘海/圆角声明）：
+            经本机 `platforms/android-37.0/data/res/values/attrs.xml:2708` 与
+            `public-final.xml:2880` 核对——**不存在** `<activity android:layoutInDisplayCutoutMode>` 这样的清单属性，
+            真实属性是**主题项** `android:windowLayoutInDisplayCutoutMode`（API 27+ 引入，属性 id 0x01010586）。
+            `never`：窗口绝不渲染到刘海/挖孔区，与本应用的诉求（状态栏保持可见、内容不被挖孔压住）一致。
+            注意：该属性只管刘海/挖孔区，**屏幕圆角不在 insets 报告范围内**；
+            圆角遮挡由「状态栏高度 inset + 布局 16dp 内边距」在机制上规避（详见 insets-fix1/fix-report.md 第四节）。
+        -->
+        <item name="android:windowLayoutInDisplayCutoutMode">never</item>
     </style>
 </resources>

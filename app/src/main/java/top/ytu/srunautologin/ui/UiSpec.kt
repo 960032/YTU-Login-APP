@@ -14,6 +14,7 @@ import top.ytu.srunautologin.net.WifiPermissionState
  *  4 | 备注名       | EditText  | id=edit_label
  *  5 | WiFi 选择区   | Button + LinearLayout | id=btn_use_current_wifi / id=ssid_list（系统列表）
  *  6 | 权限说明流程  | TextView + Button | id=text_permission_notice / id=btn_request_permission
+ * 6a | 权限状态（与说明分离）| TextView | id=text_permission_state（未授权=红 / 已授权=绿，颜色由代码按状态设置）
  *  7 | 保存         | Button    | id=btn_save
  *  8 | 状态显示区    | TextView  | id=text_status
  *  9 | 立即登录      | Button    | id=btn_login_now
@@ -31,6 +32,10 @@ object UiSpec {
         UiElement(4, "备注名", "EditText", "edit_label", "B2"),
         UiElement(5, "WiFi 选择区（系统列表 + 用当前连接的 WiFi）", "LinearLayout+Button", "ssid_list/btn_use_current_wifi", "B2"),
         UiElement(6, "权限说明与申请", "TextView+Button", "text_permission_notice/btn_request_permission", "权限策略"),
+        // 用户真机反馈（ui-fix1）：权限「说明」与「状态」原来挤在同一个 TextView 里，分辨不出。
+        // 这里如实登记新增的独立状态行；index 用 6a 表示「元素 6 的拆分」，**不重排既有 7..10 的编号**，
+        // 新增元素同样不触发 ClientChecks UI-1 的子集断言（它是「必需元素子集 + 数量下界」）。
+        UiElement(6, "权限状态（与说明分离，红/绿随状态变化）", "TextView", "text_permission_state", "用户真机反馈：权限获取与否不明显"),
         UiElement(7, "保存", "Button", "btn_save", "B2"),
         UiElement(8, "状态显示区", "TextView", "text_status", "B5"),
         UiElement(9, "立即登录", "Button", "btn_login_now", "B5/B8"),

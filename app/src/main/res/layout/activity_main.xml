@@ -1,9 +1,18 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- 配置界面布局：全部使用系统原生 View，不引入 Compose 或任何第三方 UI 库 -->
 <ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:id="@+id/scroll_root"
     android:layout_width="match_parent"
     android:layout_height="match_parent"
-    android:fillViewport="true">
+    android:clipToPadding="false"
+    android:fadeScrollbars="false"
+    android:fillViewport="true"
+    android:focusable="true"
+    android:focusableInTouchMode="true"
+    android:scrollbarStyle="insideInset"
+    android:scrollbars="vertical"
+    android:paddingEnd="4dp"
+    android:paddingRight="4dp">
 
     <LinearLayout
         android:layout_width="match_parent"
@@ -31,6 +40,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:hint="@string/hint_username"
+            android:imeOptions="actionNext"
             android:inputType="text"
             android:maxLines="1" />
 
@@ -46,6 +56,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:hint="@string/hint_password"
+            android:imeOptions="actionNext"
             android:inputType="textPassword"
             android:maxLines="1" />
 
@@ -73,6 +84,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:hint="@string/hint_label"
+            android:imeOptions="actionNext"
             android:inputType="text"
             android:maxLines="1" />
 
@@ -100,17 +112,38 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:hint="@string/hint_new_ssid"
+            android:imeOptions="actionNext"
             android:inputType="text"
             android:maxLines="1" />
 
-        <!-- 元素 6：权限说明与申请 -->
+        <!-- 元素 6：权限说明与申请。
+             说明（text_permission_notice）与状态（text_permission_state）拆成两个独立 TextView：
+             说明是固定解释性文案，状态随「已授权 / 未授权 / 降级」变化并**由代码按状态着色**
+             （绿=已授权，红=未授权）。两者之间用一条 1dp 分隔线 + 上下留白隔开，避免糊成一团。 -->
         <TextView
             android:id="@+id/text_permission_notice"
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:layout_marginTop="12dp"
             android:text="@string/permission_not_shown"
-            android:textColor="#FF6D00" />
+            android:textColor="@color/permission_notice_text" />
+
+        <!-- 说明与状态的间隔：留白 + 细横线，保证「一眼分得清哪行是说明、哪行是状态」 -->
+        <View
+            android:id="@+id/divider_permission"
+            android:layout_width="match_parent"
+            android:layout_height="1dp"
+            android:layout_marginTop="10dp"
+            android:layout_marginBottom="10dp"
+            android:background="@color/permission_divider" />
+
+        <TextView
+            android:id="@+id/text_permission_state"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/permission_state_unknown"
+            android:textColor="@color/permission_state_denied_text"
+            android:textStyle="bold" />
 
         <Button
             android:id="@+id/btn_request_permission"
@@ -154,6 +187,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:hint="@string/hint_portal"
+            android:imeOptions="actionDone"
             android:inputType="textUri"
             android:maxLines="1" />
 
