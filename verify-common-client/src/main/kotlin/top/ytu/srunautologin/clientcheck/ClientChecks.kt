@@ -117,7 +117,12 @@ class FakeWifiUiPort(
 
     override val explainText: String = "本应用需要附近设备权限，用于读取 WiFi 名称以自动登录。该信息仅在本机使用。"
 
-    override fun requiredPermissions(): List<String> = listOf(WifiPermissionPolicy.NEARBY_WIFI_DEVICES)
+    // 桩件代表「界面端口本次要申请哪些权限」，必须与产品侧同口径：
+    // 新口径（wifi-fix1 真机缺陷 R2 修订）下 API 33+ 同时申请 NEARBY_WIFI_DEVICES 与 ACCESS_FINE_LOCATION，
+    // 故改为直接委托 WifiPermissionPolicy.requiredPermissions(API_NEARBY_WIFI)，避免桩件里残留旧口径。
+    // 注：本方法在 ClientChecks.kt 中仅此一处定义、不被任何断言读取，改动对现有 57 项结论无影响。
+    override fun requiredPermissions(): List<String> =
+        WifiPermissionPolicy.requiredPermissions(WifiPermissionPolicy.API_NEARBY_WIFI)
 
     override fun permissionState(): WifiPermissionState = permission
 
@@ -756,17 +761,46 @@ object ClientChecks {
             )
             top.ytu.srunautologin.flow.PermissionText.ORDER
         }
-        r.check("PERM-2 所需权限按 SDK 版本（API 27–32 位置 / API 33+ 附近设备）与冻结策略一致") {
+        r.check("PERM-2 所需权限按 SDK 版本（API 26 无 / API 27-32 位置 / API 33+ 附近设备 + 位置）与冻结策略一致") {
             r.requireEquals(
                 listOf(WifiPermissionPolicy.ACCESS_FINE_LOCATION),
                 WifiPermissionPolicy.requiredPermissions(27), "API 27"
             )
+            // 新口径（wifi-fix1 真机缺陷 R2 修订）：API 33+ 同时申请 NEARBY_WIFI_DEVICES 与 ACCESS_FINE_LOCATION。
             r.requireEquals(
-                listOf(WifiPermissionPolicy.NEARBY_WIFI_DEVICES),
+                listOf(
+                    WifiPermissionPolicy.NEARBY_WIFI_DEVICES,
+                    WifiPermissionPolicy.ACCESS_FINE_LOCATION
+                ),
                 WifiPermissionPolicy.requiredPermissions(33), "API 33"
             )
+            r.requireEquals(
+                listOf(
+                    WifiPermissionPolicy.NEARBY_WIFI_DEVICES,
+                    WifiPermissionPolicy.ACCESS_FINE_LOCATION
+                ),
+                WifiPermissionPolicy.requiredPermissions(36), "API 36"
+            )
+            // ---- 保护断言（防回归，主 agent 要求）----
+            // 依据：真机（Redmi Turbo 4 Pro / HyperOS 3 / Android 16）只授予 NEARBY_WIFI_DEVICES 时读不到 WiFi
+            // （SSID 被系统遮罩为 <unknown ssid>、扫描列表为空）；官方 WifiManager.getScanResults() javadoc 逐字要求
+            // "An app must hold ACCESS_FINE_LOCATION permission and ACCESS_WIFI_STATE permission in order to get valid results."
+            for (sdk in listOf(33, 36)) {
+                val required = WifiPermissionPolicy.requiredPermissions(sdk)
+                r.require(
+                    required.containsAll(
+                        listOf(
+                            WifiPermissionPolicy.NEARBY_WIFI_DEVICES,
+                            WifiPermissionPolicy.ACCESS_FINE_LOCATION
+                        )
+                    ),
+                    "保护断言：API$sdk 所需权限必须同时包含 NEARBY_WIFI_DEVICES 与 ACCESS_FINE_LOCATION" +
+                        "（依据：真机实测只授予 NEARBY 时读不到 WiFi + getScanResults() javadoc 要求 ACCESS_FINE_LOCATION）；" +
+                        "实际=< $required >"
+                )
+            }
             r.requireEquals(emptyList<String>(), WifiPermissionPolicy.requiredPermissions(26), "API 26")
-            "冻结策略未被本任务改动"
+            "冻结策略（API 33/36 = NEARBY_WIFI_DEVICES + ACCESS_FINE_LOCATION，依据真机实测 + getScanResults() javadoc）"
         }
     }
 

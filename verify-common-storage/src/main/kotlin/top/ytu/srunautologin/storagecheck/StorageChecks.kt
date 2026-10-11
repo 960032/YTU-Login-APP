@@ -346,13 +346,41 @@ object StorageChecks {
 
         // ================= B. WiFi 感知与权限降级（N3） =================
 
-        item("C20", "权限策略：API 26 → NOT_REQUIRED；27–32 → FINE_LOCATION；33+ → NEARBY_WIFI_DEVICES") {
+        item(
+            "C20",
+            "权限策略：API 26 → NOT_REQUIRED；27-32 → FINE_LOCATION；33+ → NEARBY_WIFI_DEVICES + FINE_LOCATION" +
+                "（依据：真机实测「只授予 NEARBY 时读不到 WiFi」+ 官方 getScanResults() javadoc 要求 ACCESS_FINE_LOCATION）"
+        ) {
             val p = WifiPermissionPolicy
             assertEquals("API26 所需权限", emptyList<String>(), p.requiredPermissions(26))
             assertEquals("API27 所需权限", listOf(p.ACCESS_FINE_LOCATION), p.requiredPermissions(27))
             assertEquals("API32 所需权限", listOf(p.ACCESS_FINE_LOCATION), p.requiredPermissions(32))
-            assertEquals("API33 所需权限", listOf(p.NEARBY_WIFI_DEVICES), p.requiredPermissions(33))
-            assertEquals("API36 所需权限", listOf(p.NEARBY_WIFI_DEVICES), p.requiredPermissions(36))
+            // 新口径（wifi-fix1 真机缺陷 R2 修订）：API 33+ **同时申请** NEARBY_WIFI_DEVICES 与 ACCESS_FINE_LOCATION。
+            // 旧断言写死 listOf(NEARBY_WIFI_DEVICES)，属「断言过时」，非产品缺陷。
+            assertEquals(
+                "API33 所需权限",
+                listOf(p.NEARBY_WIFI_DEVICES, p.ACCESS_FINE_LOCATION),
+                p.requiredPermissions(33)
+            )
+            assertEquals(
+                "API36 所需权限",
+                listOf(p.NEARBY_WIFI_DEVICES, p.ACCESS_FINE_LOCATION),
+                p.requiredPermissions(36)
+            )
+            // ---- 保护断言（防回归，主 agent 要求）----
+            // 依据：真机（Redmi Turbo 4 Pro / HyperOS 3 / Android 16）只授予 NEARBY_WIFI_DEVICES 时读不到 WiFi
+            // （SSID 被系统遮罩为 <unknown ssid>、扫描列表为空）；官方 WifiManager.getScanResults() javadoc 逐字要求
+            // "An app must hold ACCESS_FINE_LOCATION permission and ACCESS_WIFI_STATE permission in order to get valid results."
+            // 若有人把 ACCESS_FINE_LOCATION 从 API 33+/36 的所需权限里删掉，本断言与上面的严格相等等断言都会失败。
+            for (sdk in listOf(33, 36)) {
+                val required = p.requiredPermissions(sdk)
+                assertTrue(
+                    "保护断言：API$sdk 所需权限必须同时包含 NEARBY_WIFI_DEVICES 与 ACCESS_FINE_LOCATION" +
+                        "（依据：真机实测只授予 NEARBY 时读不到 WiFi + getScanResults() javadoc 要求 ACCESS_FINE_LOCATION）；" +
+                        "实际=< $required >",
+                    required.containsAll(listOf(p.NEARBY_WIFI_DEVICES, p.ACCESS_FINE_LOCATION))
+                )
+            }
             assertEquals("API26 状态", WifiPermissionState.NOT_REQUIRED, p.state(26, emptySet()))
             assertEquals("API27 未授权", WifiPermissionState.DENIED, p.state(27, emptySet()))
             assertEquals("API27 已授权", WifiPermissionState.GRANTED, p.state(27, setOf(p.ACCESS_FINE_LOCATION)))
@@ -360,7 +388,7 @@ object StorageChecks {
             assertEquals("API33 仅 NEARBY", WifiPermissionState.GRANTED, p.state(33, setOf(p.NEARBY_WIFI_DEVICES)))
             assertEquals("API33 仅 FINE（等效）", WifiPermissionState.GRANTED, p.state(33, setOf(p.ACCESS_FINE_LOCATION)))
             assertEquals("API36 仅 NEARBY", WifiPermissionState.GRANTED, p.state(36, setOf(p.NEARBY_WIFI_DEVICES)))
-            "API26/27/32/33/36 所需权限与状态分支全部符合预期"
+            "API26/27/32/33/36 所需权限与状态分支全部符合新口径（33+ = NEARBY + FINE，state 仍为「任一即可读」）"
         }
 
         item("C21", "N3 降级：权限 DENIED 时 scanSsidList 返回空列表且不抛异常") {
