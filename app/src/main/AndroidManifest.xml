@@ -1,0 +1,85 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  SrunAutoLogin AndroidManifest。
+
+  权限台账（N4/B9：只留必要项）：
+    本任务（后台调度）新增：
+      - RECEIVE_BOOT_COMPLETED   ← 开机自启（B4 触发点 1）
+    既有：
+      - INTERNET / ACCESS_NETWORK_STATE  （认证客户端 + 网络状态判断，上一任务）
+      - ACCESS_WIFI_STATE / CHANGE_WIFI_STATE / ACCESS_FINE_LOCATION / NEARBY_WIFI_DEVICES（WiFi 感知，上一任务）
+  **明确不加**：AccessibilityService（BIND_ACCESSIBILITY_SERVICE）、悬浮窗（SYSTEM_ALERT_WINDOW）、
+  QUERY_ALL_PACKAGES、READ_CALL_LOG / READ_SMS / READ_CONTACTS、POST_NOTIFICATIONS
+  （本版本不发送任何通知，故不申请；理由见 artifacts/android-ci/ci-report.md）。
+  本版本**不使用前台服务**（无 FOREGROUND_SERVICE 权限、无前台服务类型声明）。
+-->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+    <!-- 本任务新增（B4 触发点 1：开机自启） -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- 既有：联网与网络状态 -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+
+    <!-- 既有：WiFi 感知层（net/ + platform/ 包） -->
+    <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
+    <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission
+        android:name="android.permission.NEARBY_WIFI_DEVICES"
+        android:usesPermissionFlags="neverForLocation" />
+
+    <application
+        android:name="top.ytu.srunautologin.App"
+        android:allowBackup="false"
+        android:label="@string/app_name"
+        android:supportsRtl="true"
+        android:theme="@style/AppTheme">
+
+        <activity
+            android:name="top.ytu.srunautologin.ui.MainActivity"
+            android:label="@string/app_name"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <!--
+          B4 触发点 1：开机自启。
+          BOOT_COMPLETED / LOCKED_BOOT_COMPLETED / MY_PACKAGE_REPLACED 属于 Android 7+ 隐式广播
+          限制的**豁免清单**，可以静态注册。
+          exported 显式声明为 true：这三个广播由系统/系统组件发出，必须可被外部（系统）投递。
+        -->
+        <receiver
+            android:name="top.ytu.srunautologin.work.BootCompletedReceiver"
+            android:enabled="true"
+            android:exported="true"
+            android:directBootAware="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
+
+        <!--
+          B4 触发点 3：周期保底 + 退避重试的执行体（JobScheduler 方案）。
+          exported="false" + BIND_JOB_SERVICE 权限 → 只有系统能启动；external 服务由系统调度。
+        -->
+        <service
+            android:name="top.ytu.srunautologin.work.AuthJobService"
+            android:exported="false"
+            android:permission="android.permission.BIND_JOB_SERVICE" />
+
+        <!--
+          注意（Android 7+ 隐式广播限制）：CONNECTIVITY_ACTION **不在**豁免清单里，
+          静态注册收不到，因此这里**故意不注册** NetworkChangeReceiver；
+          改由 App.onCreate 动态注册（Context.RECEIVER_NOT_EXPORTED）+ NetworkCallback 实现（B4 触发点 2）。
+        -->
+
+    </application>
+
+</manifest>

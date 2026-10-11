@@ -1,0 +1,135 @@
+# =====================================================================================
+# SrunAutoLogin —— 云端构建 APK（GitHub Actions）
+#
+# 【仓库布局假设（最重要）】本文件假设 **仓库根目录 = 原 artifacts/android-app/ 的内容**，
+# 即仓库根下直接有：settings.gradle.kts / build.gradle.kts / gradle.properties / app/ /
+# .github/workflows/build-apk.yml。因此下面所有路径都是**相对仓库根**的 `./app`、`./settings.gradle.kts`，
+# **不要**写成 `artifacts/android-app/...`（那是本地工作区的布局，不是仓库布局）。
+#
+# 【为什么不依赖 gradlew】本机无网络，无法生成 gradle-wrapper.jar / gradlew 脚本，
+# 所以用 gradle/actions/setup-gradle 在 CI 里装 Gradle，再用 `gradle` 直接跑（不走 wrapper）。
+#
+# 【版本组合（主选，与下方 env: 的默认值逐字一致）】
+#   Gradle 8.13 + AGP 8.13.0 + Kotlin 2.2.21 + JDK 17。
+#   选它的理由：AGP 与**同代** Gradle 的组合最稳（AGP 8.13 对应 Gradle 8.x 稳定线），
+#   刻意避开「AGP 8.x + Gradle 9.x」这类跨大版本、未经验证的组合（本机无网络、无 Android SDK，
+#   无法实测任何组合）。
+#   AGP / Kotlin 的版本**硬编码在根 build.gradle.kts 的 plugins {} 块里**（必须是常量字面量，
+#   这是 Kotlin DSL 的编译期约束；旧设计用 -PagpVersion 注入变量，导致首次云端构建脚本编译失败，
+#   详见 artifacts/android-ci/ci-notes.md 第 0.5 节）。要换 AGP/Kotlin 版本 = 直接改那两行字面量
+#   + 同步改 gradle.properties 的版本注释 + 本文件的 env.KOTLIN_VERSION。
+#   Gradle 版本由 gradle/actions/setup-gradle 的 gradle-version 输入决定，可用 workflow_dispatch
+#   的 gradle-version 输入直接切换。
+#   依据、备选组合与切换方法见 ci-notes.md 与本工作区的 artifacts/android-ci/version-combo.md。
+#
+# 【如遇版本组合失败，按此顺序回退】① 用 workflow_dispatch 覆盖 Gradle
+# （gradle-version 输入框，留空即用下面的主选值）
+# → ② 参考 ci-notes.md 的备选组合（先 Gradle 8.14.3 + AGP 8.13.0，再按需调整；AGP 要换就改根
+# build.gradle.kts 的 plugins {} 字面量）
+# → ③ 把失败日志里的第一条版本相关报错（如 `requires Gradle X.Y or higher`）连同
+# 「打印工具链版本」那一步的输出一起贴出来再定位。
+# =====================================================================================
+name: Build APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+    inputs:
+      gradle-version:
+        description: '覆盖 Gradle 版本（留空用主选 8.13；若构建失败，可在此填其它版本重试）'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+# 同一分支重复推送时取消上一次未完成的构建，省额度
+concurrency:
+  group: build-apk-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # 主选组合：Gradle 8.13 + AGP 8.13.0 + Kotlin 2.2.21 + JDK 17（同代组合，避开 AGP 8.x + Gradle 9.x 的未验证搭配）。
+  # 生效规则：GRADLE_VERSION 取 workflow_dispatch 输入，留空时用 || 后面的主选值；
+  #           AGP_VERSION 只用于日志打印（真实生效值在根 build.gradle.kts 的 plugins {} 字面量里）；
+  #           KOTLIN_VERSION / JAVA_VERSION 是固定值，不随输入变化。
+  #   ⚠️ 本工作流**不再传** -PagpVersion / -PkotlinVersion：Kotlin DSL 的 plugins {} 块只接受常量字面量，
+  #      传进去也没用（且旧设计直接导致脚本编译失败，见 artifacts/android-ci/ci-notes.md 第 0.5 节）。
+  # 详细依据、备选组合与切换方法见 ci-notes.md 与 artifacts/android-ci/version-combo.md
+  GRADLE_VERSION: ${{ github.event.inputs.gradle-version || '8.13' }}
+  AGP_VERSION: '8.13.0'
+  KOTLIN_VERSION: '2.2.21'
+  # 只跑主源码与 JVM 单元测试，不编译 instrumentation 测试（需要真机/模拟器）
+  JAVA_VERSION: '17'
+
+jobs:
+  build:
+    name: Build debug APK (JDK 17)
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          # 不用 wrapper：本机无法生成 gradle-wrapper.jar，这里直接指定 Gradle 版本
+          gradle-version: ${{ env.GRADLE_VERSION }}
+          cache-read-only: false
+
+      - name: 打印工具链版本（排障第一现场）
+        run: |
+          echo "== java =="; java -version
+          echo "== gradle =="; gradle --version
+          echo "目标组合：Gradle ${GRADLE_VERSION} / AGP ${AGP_VERSION} / Kotlin ${KOTLIN_VERSION} / JDK ${JAVA_VERSION}"
+
+      - name: 接受 Android SDK 许可
+        run: yes | "${ANDROID_HOME}/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || true
+
+      - name: 检查仓库布局（路径自检）
+        run: |
+          echo "仓库根内容："; ls -la
+          test -f settings.gradle.kts || { echo "::error::仓库根缺少 settings.gradle.kts —— 请确认仓库根 = 原 artifacts/android-app/ 的内容"; exit 1; }
+          test -f app/build.gradle.kts || { echo "::error::仓库根缺少 app/build.gradle.kts"; exit 1; }
+
+      - name: 单元测试（JVM，无需真机）
+        run: gradle --no-daemon testDebugUnitTest --stacktrace
+
+      - name: 构建 Debug APK
+        run: gradle --no-daemon assembleDebug --stacktrace
+
+      - name: 定位 APK
+        id: apk
+        run: |
+          APK=$(find app/build/outputs/apk -name '*.apk' | head -n 1)
+          echo "找到 APK：$APK"
+          test -n "$APK" || { echo "::error::没有产出 APK"; exit 1; }
+          echo "path=$APK" >> "$GITHUB_OUTPUT"
+
+      - name: 上传 APK 工件
+        uses: actions/upload-artifact@v4
+        with:
+          name: srun-autologin-debug-apk
+          path: ${{ steps.apk.outputs.path }}
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: 上传测试报告（失败时排障用）
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-reports
+          path: |
+            app/build/reports/tests/**
+            app/build/test-results/**
+          if-no-files-found: ignore
+          retention-days: 14

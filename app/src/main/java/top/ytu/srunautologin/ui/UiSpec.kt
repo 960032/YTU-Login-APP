@@ -1,0 +1,96 @@
+package top.ytu.srunautologin.ui
+
+import top.ytu.srunautologin.net.WifiPermissionRequestOutcome
+import top.ytu.srunautologin.net.WifiPermissionState
+
+/**
+ * 界面配置常量：把 B2 要求的所有界面元素、元素顺序、控件类型集中声明，
+ * 使「界面是否具备 N 个元素」可在 JVM 上离线核对（见 verify-common-client 的 UI 结构检查）。
+ *
+ * UI 元素 ↔ 需求编号（B2）：
+ *  1 | 账号输入     | EditText  | id=edit_username
+ *  2 | 密码输入     | EditText  | id=edit_password（inputType=textPassword）
+ *  3 | 登录方式二选一 | Spinner   | id=spinner_carrier（烟台大学 / 中国移动）
+ *  4 | 备注名       | EditText  | id=edit_label
+ *  5 | WiFi 选择区   | Button + LinearLayout | id=btn_use_current_wifi / id=ssid_list（系统列表）
+ *  6 | 权限说明流程  | TextView + Button | id=text_permission_notice / id=btn_request_permission
+ *  7 | 保存         | Button    | id=btn_save
+ *  8 | 状态显示区    | TextView  | id=text_status
+ *  9 | 立即登录      | Button    | id=btn_login_now
+ */
+object UiSpec {
+
+    /** 界面元素声明（顺序即界面自上而下的顺序）。 */
+    val ELEMENTS: List<UiElement> = listOf(
+        UiElement(1, "账号输入", "EditText", "edit_username", "B2"),
+        UiElement(2, "密码输入", "EditText", "edit_password", "B2（inputType=textPassword）"),
+        UiElement(3, "登录方式二选一", "Spinner", "spinner_carrier", "B2（烟台大学/中国移动）"),
+        UiElement(4, "备注名", "EditText", "edit_label", "B2"),
+        UiElement(5, "WiFi 选择区（系统列表 + 用当前连接的 WiFi）", "LinearLayout+Button", "ssid_list/btn_use_current_wifi", "B2"),
+        UiElement(6, "权限说明与申请", "TextView+Button", "text_permission_notice/btn_request_permission", "权限策略"),
+        UiElement(7, "保存", "Button", "btn_save", "B2"),
+        UiElement(8, "状态显示区", "TextView", "text_status", "B5"),
+        UiElement(9, "立即登录", "Button", "btn_login_now", "B5/B8")
+    )
+
+    /** 状态区必须能表达的信息类别（B5：成功/失败原因/时间）。 */
+    val STATUS_FIELDS: List<String> = listOf("成功或失败", "失败原因（错误分类 + 错误码 + 服务端信息）", "时间（HH:mm:ss）", "阶段 stage", "耗时 elapsedMs")
+
+    /** 失败原因不得静默：任何非 ok 结果都必须写入状态区并可见。 */
+    const val FAILURE_MUST_BE_VISIBLE: Boolean = true
+}
+
+/** 一条界面元素声明。 */
+data class UiElement(
+    val index: Int,
+    val name: String,
+    val viewType: String,
+    val viewId: String,
+    val requirement: String
+) {
+    override fun toString(): String = "$index. $name [$viewType] #$viewId（$requirement）"
+}
+
+/**
+ * 权限申请结果的界面端口（Activity 实现，ViewModel 依赖）。
+ *
+ * 顺序被接口固化（用户需求原文：先说明权限用途 → 再申请 → 不同意则只检查当前 wifi）：
+ *  [explainText] 取文案 → [markRationaleShown] 记录已说明 → [requestPermissions] 弹系统对话框
+ *  → [onRequestResult] 处理结果。[requestPermissions] 内部必须先调 markRationaleShown，否则会抛异常。
+ */
+interface PermissionPort {
+    val explainText: String
+    fun requiredPermissions(): List<String>
+    fun state(): WifiPermissionState
+    fun markRationaleShown()
+    fun onRequestResult(outcome: WifiPermissionRequestOutcome): WifiPermissionState
+    fun requestPermissions()
+    fun capabilityDegradedReason(): String?
+}
+
+/**
+ * 从接口 [PermissionPort] 到界面 [WifiUiPort] 的适配器（纯逻辑，可离线测试顺序）。
+ *
+ * 关键点：View 层的 ViewModel 只调用本适配器，因此「先说明再申请」的顺序在任何 Activity 上都成立；
+ * 顺序测试在 JVM 上用假端口即可验证。
+ *
+ * WiFi 快照相关成员（currentSsid / scanSsidList）由子类补齐（真机在 MainActivity 里挂 WifiSnapshotCore）。
+ */
+abstract class PermissionUiAdapter(private val port: PermissionPort) : WifiUiPort {
+
+    override val explainText: String get() = port.explainText
+
+    override fun requiredPermissions(): List<String> = port.requiredPermissions()
+
+    override fun permissionState(): WifiPermissionState = port.state()
+
+    override fun capability(): top.ytu.srunautologin.net.WifiCapability =
+        top.ytu.srunautologin.net.WifiPermissionPolicy.capability(port.state())
+
+    override fun markRationaleShown() = port.markRationaleShown()
+
+    override fun onRequestResult(granted: Boolean): WifiPermissionState =
+        port.onRequestResult(
+            if (granted) WifiPermissionRequestOutcome.GRANTED else WifiPermissionRequestOutcome.DENIED
+        )
+}
