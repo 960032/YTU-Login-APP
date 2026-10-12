@@ -107,7 +107,7 @@ class SrunAuthClient(
         val portal = SrunRequestBuilder.normalizePortal(req.portal)
         if (portal.isEmpty()) {
             return AuthResult.failure(
-                AuthFailure.CONFIG_MISSING, AuthCodes.E_CONFIG, "Portal 地址为空，未发起任何请求",
+                AuthFailure.CONFIG_MISSING, AuthCodes.E_CONFIG, "门户地址为空，未发起任何请求",
                 AuthStage.CONFIG, elapsed()
             )
         }
@@ -123,7 +123,7 @@ class SrunAuthClient(
         } catch (e: IOException) {
             return AuthResult.failure(
                 AuthFailure.PORTAL_UNREACHABLE, AuthCodes.E_PORTAL,
-                "无法连接 Portal（$portal）：${e.message ?: e::class.java.simpleName}",
+                "无法连接门户（$portal）：${e.message ?: e::class.java.simpleName}",
                 AuthStage.CHALLENGE, elapsed(), ipSource
             )
         }
@@ -175,7 +175,7 @@ class SrunAuthClient(
         } catch (e: IOException) {
             return AuthResult.failure(
                 AuthFailure.PORTAL_UNREACHABLE, AuthCodes.E_PORTAL,
-                "无法连接 Portal（$portal）：${e.message ?: e::class.java.simpleName}",
+                "无法连接门户（$portal）：${e.message ?: e::class.java.simpleName}",
                 AuthStage.LOGIN, elapsed(), ipSource
             )
         }

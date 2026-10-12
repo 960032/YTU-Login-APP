@@ -206,13 +206,13 @@ class ConfigViewModel(
         }
         val store = portalStore
             ?: run {
-                val msg = "保存失败：Portal 地址存储不可用（未注入 KeyValueStore）"
+                val msg = "保存失败：门户地址存储不可用（未注入 KeyValueStore）"
                 update { it.copy(statusText = msg, statusOk = false) }
                 return PortalSaveOutcome.Invalid(msg)
             }
         val saved = PortalConfig.write(store, raw)
             ?: run {
-                val msg = "保存失败：Portal 地址非法（$raw），已保留原值"
+                val msg = "保存失败：门户地址非法（$raw），已保留原值"
                 update { it.copy(statusText = msg, statusOk = false) }
                 return PortalSaveOutcome.Invalid(msg)
             }
@@ -220,7 +220,7 @@ class ConfigViewModel(
         update {
             it.copy(
                 portalInput = saved,
-                statusText = "已保存 Portal 地址：$saved（重启应用后仍然生效）",
+                statusText = "已保存门户地址：$saved（重启应用后仍然生效）",
                 statusOk = true
             )
         }
@@ -431,10 +431,10 @@ class ConfigViewModel(
         /** 保存前的可见校验：返回 null 表示合法；否则返回给用户看的原因（含原始输入）。 */
         fun validatePortalInput(raw: String): String? {
             val trimmed = raw.trim()
-            if (trimmed.isEmpty()) return "Portal 地址不能为空（示例：${PortalConfig.DEFAULT_PORTAL}）"
-            if (trimmed.any { it.isWhitespace() }) return "Portal 地址中间不能有空格：$trimmed"
+            if (trimmed.isEmpty()) return "门户地址不能为空（示例：${PortalConfig.DEFAULT_PORTAL}）"
+            if (trimmed.any { it.isWhitespace() }) return "门户地址中间不能有空格：$trimmed"
             if (PortalConfig.normalize(trimmed) == null) {
-                return "Portal 地址非法：$trimmed（只支持主机名或 IPv4，可带 http:// 前缀，不要带路径）"
+                return "门户地址非法：$trimmed（只支持主机名或 IPv4，可带 http:// 前缀，不要带路径）"
             }
             return null
         }

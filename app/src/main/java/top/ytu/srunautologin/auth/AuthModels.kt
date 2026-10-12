@@ -102,7 +102,7 @@ data class AuthResult(
 /** 错误分类：网络不可达 / Portal 不可达 / 业务拒绝 / 配置缺失 / 解析失败 / 协议异常。 */
 enum class AuthFailure(val displayName: String) {
     NETWORK_UNREACHABLE("网络不可达"),
-    PORTAL_UNREACHABLE("Portal 不可达"),
+    PORTAL_UNREACHABLE("门户不可达"),
     REJECTED("服务端拒绝（密码错误等）"),
     CONFIG_MISSING("配置缺失"),
     PARSE_FAILED("响应解析失败"),

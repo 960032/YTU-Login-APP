@@ -32,9 +32,9 @@
     <string name="dialog_wifi_title">选择 WiFi</string>
     <string name="dialog_cancel">取消</string>
     <!-- 元素 5 原地保留的「当前选择」摘要行（列表改为弹窗后，原地只说明现在选中的是哪个） -->
-    <string name="ssid_selected_none">尚未选择 WiFi（点上方「选择列表」）</string>
+    <string name="ssid_selected_none">尚未选择网络</string>
     <string name="ssid_selected_current">当前选择：%1$s</string>
-    <string name="ssid_list_count">已识别 %1$d 个 WiFi（点「选择列表」查看并选择）</string>
+    <string name="ssid_list_count">已识别 %1$d 个网络</string>
     <!-- WiFi 列表长度上限（insets-fix1 / B：周边 WiFi 可能上百个，全部渲染会把下方控件推得极远） -->
     <string name="ssid_list_more">还有 %1$d 个未显示</string>
 
@@ -42,18 +42,18 @@
     <string name="btn_request_permission">申请「位置信息」权限</string>
     <string name="permission_explain_title">权限用途说明</string>
     <string name="permission_grant_ok">同意并申请</string>
-    <string name="permission_grant_cancel">暂不申请（只检测当前 WiFi）</string>
-    <string name="permission_not_shown">尚未申请「位置信息」权限：列表可能为空，可点下方按钮先查看权限用途说明</string>
+    <string name="permission_grant_cancel">未授权,仅访问当前网络</string>
+    <string name="permission_not_shown">未授权,仅访问当前网络</string>
     <string name="degraded_prefix">当前处于降级状态</string>
-    <string name="degraded_no_list">「位置信息」权限被拒：仅检测当前连接的 WiFi，不显示周边列表</string>
+    <string name="degraded_no_list">未授权位置信息,仅访问当前网络</string>
     <!-- wifi-fix1（B）：权限已授予但系统读不到 WiFi 信息时，列表区的显式提示（指向系统「位置信息」总开关） -->
-    <string name="ssid_list_empty_no_data">已获得权限，但系统未返回 WiFi 信息：请先确认系统「位置信息」总开关已开启，并确认本应用已开启「精确位置」（关闭精确位置会读不到 WiFi 名称与列表）</string>
+    <string name="ssid_list_empty_no_data">不能访问网络列表,请确认定位开关已开启，并确认本应用已开启精确位置权限</string>
 
     <!-- 元素 6 的状态行（与说明分开显示，颜色由代码按状态设置） -->
-    <string name="permission_state_unknown">WiFi 权限：尚未申请</string>
-    <string name="permission_state_granted">WiFi 权限：已授权</string>
+    <string name="permission_state_unknown">未授权</string>
+    <string name="permission_state_granted">已授权</string>
     <string name="permission_state_denied">WiFi 权限：未授权（需「位置信息」权限）</string>
-    <string name="permission_state_degraded_suffix">（降级中）</string>
+    <string name="permission_state_degraded_suffix">不完整权限</string>
     <string name="permission_notice_common">该「位置信息」权限用于读取 WiFi 名称（Android 规定 WiFi 名称属于位置信息），以便自动登录到校园网；不同意时仍可登录已连接的 WiFi。</string>
 
     <!-- 元素 7：保存 -->
@@ -65,15 +65,15 @@
 
     <!-- 元素 9：立即登录（uifix2 任务 A：认证链路在后台线程执行，点击后状态区先给「正在登录」反馈） -->
     <string name="btn_login_now">立即登录</string>
-    <string name="login_running">正在登录…（认证请求在后台线程执行，界面不会卡住）</string>
+    <string name="login_running">正在登录…</string>
     <string name="login_failed_prefix">登录失败：</string>
 
     <!-- 元素 10：Portal（门户）地址（不同校区地址不同，可自行输入并保存）
          uifix2（任务 C-3）：用户逐字要求：原「Portal地址(校园网门户,按校区填写)」→「网络门户地址」 -->
     <string name="label_portal">网络门户地址</string>
     <string name="hint_portal">如 202.194.116.116</string>
-    <string name="btn_save_portal">保存 Portal 地址</string>
-    <string name="save_portal_done">已保存 Portal 地址：%1$s</string>
+    <string name="btn_save_portal">保存门户地址</string>
+    <string name="save_portal_done">已保存门户地址：%1$s</string>
     <!-- 元素 10b（uifix2 任务 C-2）：Portal 地址常驻状态显示。
          未保存 = 红（#FFC62828）显示「尚未保存地址」；已保存 = 绿（#FF2E7D32）显示「已保存portal:<地址>」
          ——「portal:」小写、冒号后无空格，逐字按用户给的格式。 -->
@@ -93,7 +93,7 @@
 
     <!-- ================= 元素 11：早上自动登录（morning1 任务）================= -->
     <!-- 启停开关：**逐字**采用用户要求「点击(启用/停用)自动登录」（半角括号，逐字不改） -->
-    <string name="btn_toggle_auto_login">点击(启用/停用)自动登录</string>
+    <string name="btn_toggle_auto_login">点击切换自动登录状态</string>
     <!-- 开关状态行：按钮文案逐字不变，另用一行明确显示当前是启用还是停用 -->
     <string name="morning_status_enabled">自动登录：已启用（每天 06:00 起每 10 分钟尝试一次，最多 7 次，07:00 截止）</string>
     <string name="morning_status_disabled">自动登录：已停用（后台任务不会执行）</string>
@@ -102,7 +102,7 @@
     <string name="morning_btn_open_autostart">前往系统设置开启自启动</string>
     <string name="morning_toast_autostart_ok">已跳转到系统的自启动管理页</string>
     <string name="morning_toast_autostart_fallback">未找到本机机型的「自启动管理」页面，已改为打开应用详情页：请在此页面手动开启「自启动」与「后台弹出界面」</string>
-    <string name="morning_toast_notification_denied">通知被禁用：前台服务的常驻通知无法显示，自动登录仍会在后台执行，但你看不到状态。请在系统设置里允许本应用发送通知</string>
+    <string name="morning_toast_notification_denied">通知被禁用：无法显示工作状态</string>
     <string name="morning_notification_no_account">（尚未保存账号）</string>
     <string name="morning_notification_no_ssid">（尚未绑定 WiFi）</string>
 
@@ -112,7 +112,7 @@
     <!-- 内容：已保存登录账号:<账号名>,将登录网络:<网络名>（英文半角逗号；%1$s=账号名、%2$s=网络名） -->
     <string name="morning_notification_text">已保存登录账号:%1$s,将登录网络:%2$s</string>
     <string name="morning_channel_name">自动连接</string>
-    <string name="morning_channel_desc">显示自动连接的工作状态（常驻，不可消除）</string>
+    <string name="morning_channel_desc">显示自动连接的工作状态</string>
 
     <!-- ================= 元素 12：账号选择（accountsel1 任务，用户原话）=================
          按钮「账号选择」→ 弹窗标题**逐字**「选择生效账号」；每行：勾选框 → 账户（偏左） → 网络（偏右） → 蓝色「删除」（最右）；
