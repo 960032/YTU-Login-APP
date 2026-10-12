@@ -101,6 +101,16 @@
             android:layout_height="wrap_content"
             android:text="@string/btn_use_current_wifi" />
 
+        <!-- 元素 5b（uifix2 任务 C-1）：用户要求「将选择wifi功能做进弹出窗口，添加可点击的『选择列表』按钮」。
+             点击 → 刷新已识别 WiFi 列表 → 弹出**单选**对话框供选择（android.app.AlertDialog，零第三方依赖）。
+             原有 ssid_list 容器保留（id 与位置不变，元素 5 的必需 id），但不再渲染可勾选列表：
+             它现在只显示「当前选择：<ssid>」与降级/空列表提示（理由见 artifacts/uifix2/fix-report.md 任务 C-1）。 -->
+        <Button
+            android:id="@+id/btn_choose_wifi"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/btn_choose_wifi" />
+
         <LinearLayout
             android:id="@+id/ssid_list"
             android:layout_width="match_parent"
@@ -190,6 +200,19 @@
             android:imeOptions="actionDone"
             android:inputType="textUri"
             android:maxLines="1" />
+
+        <!-- 元素 10b（uifix2 任务 C-2）：Portal 地址**常驻状态**显示（用户原话：
+             未保存则使用红色字体显示「尚未保存地址」，保存则用绿色字体显示「已保存portal:<地址>」）。
+             颜色/文案在运行时由代码按「存储里是否真的有这个键」覆写（MainActivity.renderPortalStatus），
+             XML 这里只给初始值（红 + 「尚未保存地址」）。 -->
+        <TextView
+            android:id="@+id/text_portal_status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="@string/portal_status_unsaved"
+            android:textColor="@color/portal_status_unsaved_text"
+            android:textStyle="bold" />
 
         <Button
             android:id="@+id/btn_save_portal"

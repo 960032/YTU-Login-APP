@@ -8,7 +8,8 @@
 
     <!-- 元素 1：账号 -->
     <string name="label_username">账号</string>
-    <string name="hint_username">学号/手机号（不含 @ytu 后缀也可）</string>
+    <!-- uifix2（任务 C-3）：用户逐字要求的文案。注意用户写的是「登**陆**账户」（非「登录」），逐字采用。 -->
+    <string name="hint_username">登陆账户</string>
 
     <!-- 元素 2：密码 -->
     <string name="label_password">密码</string>
@@ -24,7 +25,16 @@
     <!-- 元素 5：WiFi 选择 -->
     <string name="label_wifi">WiFi 选择</string>
     <string name="btn_use_current_wifi">使用当前连接 wifi</string>
-    <string name="hint_new_ssid">或手动输入 WiFi 名称</string>
+    <!-- uifix2（任务 C-3）：用户逐字要求：原「或手动输入 WiFi 名称」→「输入wifi名称」 -->
+    <string name="hint_new_ssid">输入wifi名称</string>
+    <!-- 元素 5b（uifix2 任务 C-1）：用户要求「将选择wifi功能做进弹出窗口，添加可点击的『选择列表』按钮」 -->
+    <string name="btn_choose_wifi">选择列表</string>
+    <string name="dialog_wifi_title">选择 WiFi</string>
+    <string name="dialog_cancel">取消</string>
+    <!-- 元素 5 原地保留的「当前选择」摘要行（列表改为弹窗后，原地只说明现在选中的是哪个） -->
+    <string name="ssid_selected_none">尚未选择 WiFi（点上方「选择列表」）</string>
+    <string name="ssid_selected_current">当前选择：%1$s</string>
+    <string name="ssid_list_count">已识别 %1$d 个 WiFi（点「选择列表」查看并选择）</string>
     <!-- WiFi 列表长度上限（insets-fix1 / B：周边 WiFi 可能上百个，全部渲染会把下方控件推得极远） -->
     <string name="ssid_list_more">还有 %1$d 个未显示</string>
 
@@ -53,14 +63,22 @@
     <!-- 元素 8：状态区 -->
     <string name="status_initial">尚未登录</string>
 
-    <!-- 元素 9：立即登录 -->
+    <!-- 元素 9：立即登录（uifix2 任务 A：认证链路在后台线程执行，点击后状态区先给「正在登录」反馈） -->
     <string name="btn_login_now">立即登录</string>
+    <string name="login_running">正在登录…（认证请求在后台线程执行，界面不会卡住）</string>
+    <string name="login_failed_prefix">登录失败：</string>
 
-    <!-- 元素 10：Portal（门户）地址（不同校区地址不同，可自行输入并保存） -->
-    <string name="label_portal">Portal 地址（校园网门户，按校区填写）</string>
+    <!-- 元素 10：Portal（门户）地址（不同校区地址不同，可自行输入并保存）
+         uifix2（任务 C-3）：用户逐字要求：原「Portal地址(校园网门户,按校区填写)」→「网络门户地址」 -->
+    <string name="label_portal">网络门户地址</string>
     <string name="hint_portal">如 202.194.116.116（可带 http:// 前缀）</string>
     <string name="btn_save_portal">保存 Portal 地址</string>
     <string name="save_portal_done">已保存 Portal 地址：%1$s</string>
+    <!-- 元素 10b（uifix2 任务 C-2）：Portal 地址常驻状态显示。
+         未保存 = 红（#FFC62828）显示「尚未保存地址」；已保存 = 绿（#FF2E7D32）显示「已保存portal:<地址>」
+         ——「portal:」小写、冒号后无空格，逐字按用户给的格式。 -->
+    <string name="portal_status_unsaved">尚未保存地址</string>
+    <string name="portal_status_saved">已保存portal:%1$s</string>
 
     <!-- 元素 6 的配色引用（代码按状态覆写：未授权=红、已授权=绿；此处仅作初始值） -->
     <color name="permission_state_granted_text">#FF2E7D32</color>
@@ -69,4 +87,7 @@
     <color name="permission_state_degraded_text">#FFF57F17</color>
     <color name="permission_notice_text">#FF616161</color>
     <color name="permission_divider">#FFE0E0E0</color>
+    <!-- 元素 10b（uifix2）：Portal 常驻状态的初始配色（运行时由代码按「是否真的保存过」覆写） -->
+    <color name="portal_status_unsaved_text">#FFC62828</color>
+    <color name="portal_status_saved_text">#FF2E7D32</color>
 </resources>

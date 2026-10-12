@@ -406,6 +406,9 @@ class MainActivity : Activity() {
     private fun buildViewModel() {
         // portalStore 在此首次访问 → 触发 by lazy 求值；此时 onCreate 已执行，Activity 已 attach
         viewModel = ConfigViewModel(wifiUiPort, loginTrigger, portalStore)
+        // 【uifix2 任务 B】启动回填：把已保存的凭据读进 ViewModel 状态；必须在 bindViews() **之前**调用，
+        // 因为 bindViews() 直接用 viewModel.state.* 作为各输入框的初值。
+        backfillFromStorage()
         spinnerCarrier.adapter = ArrayAdapter(
             this,
             android.R.layout.simple_spinner_item,
@@ -413,8 +416,62 @@ class MainActivity : Activity() {
         ).also { it.setDropDownViewResource(android.R.layout.simple_spinner_dropdown_item) }
     }
 
+    /**
+     * 【uifix2 任务 B】启动回填：把**已保存的凭据**读进界面（账号 / 密码 / 备注名 / 登录方式）。
+     *
+     * 用户反馈的「可以保存账号，但是无法继承账号信息，退出程序重新进入后保存的校园网门户和账号都会失效」，
+     * 真因不是没保存成功（真机 SharedPreferences 里 `credentials_v1` / `srun_portal_v1` 都在），
+     * 而是**界面从来没读过它们**：旧代码只有保存侧（bindViews 里的 upsert / bind / select），
+     * 启动时没有任何读取回填。本方法补上读取侧。
+     *
+     * 读取路径（全部是既有 API，未新增任何存储机制）：
+     *   `SrunStorage.credentialRepository(this)` → `.list()`（全部凭据；密文解密失败时内部已降级为空列表，
+     *   见 storage/CredentialRepository.kt:28-40）→ `.selectedLabel()`（`selected_label_v1`，当前选中的备注名）。
+     *
+     * 赋值点（全部是 ViewModel 既有公开方法，**构造签名与业务逻辑一字未改**）：
+     *   `selectCarrier` / `setUsername` / `setPassword` / `setLabel` → 随后 `bindViews()` 用
+     *   `viewModel.state.usernameInput / passwordInput / labelInput` 作为输入框初值。
+     *   Portal 地址**不在这里回填**：它本来就走 `ConfigViewModel.portalInitialInput(portalStore)`
+     *   （= `PortalConfig.read`），在上一行构造 ViewModel 时已经生效（见 fix-report.md 任务 B-3）。
+     *
+     * 四条硬约束：
+     *  1) **绝不抛异常**：整段用 runCatching 包住（Keystore 不可用 / 密文被篡改 / 存储异常都降级为
+     *     「没保存过」）——这条同步栈在 onCreate 内，任何异常都会变成闪退；
+     *  2) **不拿空值覆盖界面**：字段为空的记录不会去 set* 覆盖 ViewModel 的默认值；
+     *  3) **顺序**：先 `selectCarrier` 再 `setLabel`。`selectCarrier` 在「备注名未被用户改过」时会用运营商
+     *     显示名覆盖备注名（ConfigViewModel.kt:232-239），若反过来调用，回填出来的备注名会被冲掉；
+     *  4) **不进日志**：本方法不打印任何凭据内容（连备注名也不打），凭据只经 ViewModel 状态呈现在界面上。
+     *
+     * 顺序上还有个细节：`setLabel` 会把 `labelTouched` 置为 true，从而锁定回填出来的备注名不被后续
+     * 「切换登录方式」自动改写——这正是「继承已保存信息」应有的行为。
+     */
+    private fun backfillFromStorage() {
+        val restored = runCatching {
+            val repo = SrunStorage.credentialRepository(this)
+            val all = repo.list()
+            // 当前选中（selected_label_v1）优先；该记录已被删除时退化为第一条，绝不因此放弃整次回填
+            val selected = repo.selectedLabel()
+            all.firstOrNull { it.label == selected } ?: all.firstOrNull()
+        }.getOrNull() ?: return
+
+        runCatching {
+            viewModel.selectCarrier(CarrierOption.fromValue(restored.carrier).ordinal)
+            if (restored.username.isNotEmpty()) viewModel.setUsername(restored.username)
+            if (restored.password.isNotEmpty()) viewModel.setPassword(restored.password)
+            if (restored.label.isNotEmpty()) viewModel.setLabel(restored.label)
+        }.onFailure { t ->
+            // 回填失败不阻断启动：记一条 logcat 即可（message 里只有异常类型，不含凭据内容）
+            Log.e(TAG, "启动回填失败（已降级为默认界面）", t)
+        }
+    }
+
     private fun bindViews() {
         editUsername.setText(viewModel.state.usernameInput)
+        // 【uifix2 任务 B】密码同样回填（取舍与理由见 fix-report.md 任务 B-2）：不回填的话，用户重启后
+        // 看到的密码一定是空的，「点保存」还会以「密码不能为空」失败——那正是他说的「账号信息失效」。
+        // 密码只进 EditText 与 ViewModel 的内存状态：输入框本身 inputType=textPassword（掩码显示），
+        // 且**不进任何日志 / 状态文本**（状态区文案只含账号与错误原因）。
+        editPassword.setText(viewModel.state.passwordInput)
         editLabel.setText(viewModel.state.labelInput)
 
         // 元素 1/2/4：输入即时回写 ViewModel（业务判断不在这里做）
@@ -489,12 +546,187 @@ class MainActivity : Activity() {
             scrollTo(textStatus)
         }
 
+        // 元素 5b（uifix2 任务 C-1）：点「选择列表」→ 刷新已识别 WiFi 列表 → 弹出单选对话框供选择。
+        // 用 findViewById 直接取控件（不入实例字段）：本 Activity 的实例字段都是「onCreate 里 findViewById
+        // 赋值、多处共用」的形式，而这个按钮只在 bindViews 里挂一次监听，没有共享需求。
+        findViewById<Button>(R.id.btn_choose_wifi).setOnClickListener { chooseWifiFromDialog() }
+
         // 元素 9：立即登录（B8 在 AuthFlow 内判定；SSID 不匹配时零请求）
-        btnLoginNow.setOnClickListener {
-            viewModel.loginNow()
-            render()
-            // 结果写在界面最下方；主动滚过去，避免用户以为「点了没反应」
-            scrollTo(textStatus)
+        // 【uifix2 任务 A】点击后**不在主线程**做网络：整条链路（本机 IP 探测 + get_challenge + srun_portal
+        // 两次 HTTP）交给后台线程，主线程只负责开始前与结束后的界面读写。详见 startLoginNow() 的 KDoc。
+        btnLoginNow.setOnClickListener { startLoginNow() }
+    }
+
+    /**
+     * 【uifix2 任务 A】「立即登录」的线程模型 —— 真机 `NetworkOnMainThreadException` 的修复点。
+     *
+     * 修复前的调用链（与真机堆栈逐行对应，全部在**主线程**上同步执行）：
+     *   btnLoginNow.onClick(MainActivity.kt:494) → ConfigViewModel.loginNow(ConfigViewModel.kt:386)
+     *   → MainActivity$loginTrigger$1.login(MainActivity.kt:155) → AuthFlow.run(AuthFlow.kt:153)
+     *   → AuthFlow.runInternal(AuthFlow.kt:203) → SrunAuthClient.execute(SrunAuthClient.kt:122)
+     *   → HttpUrlConnectionEngine.get(SrunAuthClient.kt:48) → HttpURLConnectionImpl.getResponseCode
+     *   → AbstractPlainSocketImpl.doConnect
+     *   ⇒ Android 直接抛 `android.os.NetworkOnMainThreadException`（主线程禁止阻塞式网络 IO）。
+     *
+     * 修复后（三条各自独立的保证，缺一不可）：
+     *  ① **网络在后台线程**：`Thread { ... }.start()` —— 本任务允许的两选一
+     *     （`Executors.newSingleThreadExecutor()` 或 `Thread`）里的 `Thread`，选它的理由见
+     *     fix-report.md 任务 A「为什么不用线程池」。线程体内调用 `viewModel.loginNow()`，
+     *     **它的签名与内部实现一字未改**：线程切换完全由 UI 层负责，B8 的 SSID 匹配判定、
+     *     跳过原因、错误分类等业务逻辑仍留在 ViewModel/AuthFlow 内，位置不变。
+     *  ② **结果回主线程**：`runOnUiThread { finishLogin(...) }`。`render()` / `scrollTo()` /
+     *     对 `viewModel.state` 的读取**只**发生在这一层（Android 的 View 不是线程安全的）。
+     *  ③ **异常绝不逃逸**：后台线程体内用 try/catch 收住**任何** Throwable，转成状态区可见的红字错误
+     *     （+ Toast + logcat），而不是从 onClick 冒到主线程把应用打崩。
+     *     这是本任务最要紧的一条：用户已被崩溃困扰多次，宁可显示「登录失败：…」。
+     *
+     * 连点保护：认证在途时按钮置灰（`btnLoginNow.isEnabled = false`，收尾时恢复），
+     * 一次只允许一个认证在途，避免两次认证并发改写状态区。
+     *
+     * 为什么把「正在登录…」先写进状态区：认证是秒级任务，期间界面上必须有反应，
+     * 否则用户会以为「点了没动」而反复点击（结束后 `render()` 会用真实结果覆盖它）。
+     */
+    private fun startLoginNow() {
+        if (!btnLoginNow.isEnabled) return
+        btnLoginNow.isEnabled = false
+        textStatus.text = getString(R.string.login_running)
+        applyStateColor(textStatus, COLOR_STATUS_FAIL)
+        scrollTo(textStatus)
+
+        val submitted = runCatching {
+            val worker = Thread {
+                // ① 后台线程：只做网络与纯逻辑，**绝不在此触碰任何 View**。
+                //    异常转成 failure 值（而不是继续向上抛）：这样异常一定会被带回主线程变成可见文本。
+                val failure: Throwable? = try {
+                    viewModel.loginNow()
+                    null
+                } catch (t: Throwable) {
+                    t
+                }
+                // ② 结果回主线程渲染（③ 里接住的异常也一并带回去显示）
+                runOnUiThread { finishLogin(failure) }
+            }
+            worker.name = "srun-login-now"   // 线程名固定：logcat / 线程转储里可辨认
+            worker.isDaemon = true           // 不阻止进程退出（与 AuthJobService 的工作线程同一约定）
+            worker.start()
+        }
+        if (submitted.isFailure) {
+            // 极端情况：Thread 构造/启动自身就抛（例如线程数超限）。这是同步栈上的异常，
+            // 同样必须兜住并复原界面，否则用户看到的是灰掉的按钮 + 一条「正在登录…」。
+            finishLogin(submitted.exceptionOrNull() ?: RuntimeException("启动登录线程失败"))
+        }
+    }
+
+    /**
+     * 登录收尾（**必须在主线程调用**）：渲染结果 + 复原按钮。
+     *
+     * 三条路径全部走这里：成功（`viewModel.state` 已由 ViewModel 写好）、失败（同上）、
+     * 后台线程异常（[failure] 非空，状态区显示异常文本而不是崩溃）。
+     * 渲染过程自身也被 try/catch 包住——「兜底的兜底」：渲染出错绝不能把异常抛回主线程。
+     */
+    private fun finishLogin(failure: Throwable?) {
+        try {
+            if (failure == null) {
+                render()
+                scrollTo(textStatus)
+            } else {
+                showLoginFailure(failure)
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "登录收尾渲染失败（已忽略，绝不二次崩溃）", t)
+        } finally {
+            // 成功/失败/异常都必须复原按钮，否则「立即登录」会永久灰着
+            btnLoginNow.isEnabled = true
+        }
+    }
+
+    /**
+     * 后台线程异常 → **状态区可见的错误文本**（红字 + Toast + logcat），绝不让异常逃逸。
+     *
+     * 文本只含异常类名与 message；栈用 `Log.getStackTraceString`（只有类名与行号，不含参数值），
+     * 因此**不会把密码写进日志**（网络层异常 message 里是 URL 与状态码，不是凭据）。
+     */
+    private fun showLoginFailure(e: Throwable) {
+        val reason = e.message?.takeIf { it.isNotBlank() } ?: "无 message"
+        val text = getString(R.string.login_failed_prefix) + e.javaClass.simpleName + "：" + reason
+        Log.e(TAG, text, e)
+        textStatus.text = text
+        applyStateColor(textStatus, COLOR_STATUS_FAIL)
+        toast(text)
+        scrollTo(textStatus)
+    }
+
+    /**
+     * 元素 5b（uifix2 任务 C-1）：`选择列表` 按钮的三步 —— ① 刷新已识别 WiFi 列表 → ② 弹出列表 → ③ 选择生效。
+     *
+     * 为什么用 `setSingleChoiceItems`（单选列表）而不是多选/自定义视图：既有数据模型就是「选一个」
+     * （`ConfigUiState.selectedSsid` 是单值），单选列表与模型一一对应；旧的内嵌 CheckBox 列表
+     * 让每个 WiFi 各自可勾选，与「单选」语义不符。
+     *
+     * 为什么列表为空时也弹窗（而不是静默）：权限被拒（degraded）或系统读不到 WiFi 时，
+     * 静默不弹会表现为「点了按钮没反应」；这里弹一条**说明性**对话框，文案与原地提示同源
+     * （`degraded_no_list` / `ssid_list_empty_no_data`），告诉用户该怎么解决。
+     *
+     * 全过程零第三方依赖：`android.app.AlertDialog`（框架原生）已在文件头 import。
+     */
+    private fun chooseWifiFromDialog() {
+        // ① 刷新：先重新读系统检测到的 WiFi（内部 = viewModel.refreshSsidList() + render()）
+        refreshSsidList()
+        val s = viewModel.state
+        val items = s.ssidList.toTypedArray()
+        if (items.isEmpty()) {
+            val reason = if (s.degraded) {
+                getString(R.string.degraded_no_list)
+            } else {
+                getString(R.string.ssid_list_empty_no_data)
+            }
+            AlertDialog.Builder(this)
+                .setTitle(R.string.dialog_wifi_title)
+                .setMessage(reason)
+                .setPositiveButton(R.string.dialog_cancel, null)
+                .show()
+            return
+        }
+        // 预选中当前已选项（没有则 -1 = 不预选）
+        val checked = s.selectedSsid?.let { sel -> items.indexOfFirst { it == sel } } ?: -1
+        AlertDialog.Builder(this)
+            .setTitle(R.string.dialog_wifi_title)
+            .setSingleChoiceItems(items, checked) { dialog, which ->
+                // ③ 选择生效：写回 ViewModel —— 与内嵌列表点击走的是**同一个** selectSsid，行为完全一致
+                viewModel.selectSsid(items[which])
+                dialog.dismiss()
+                render()
+                scrollTo(ssidList)
+            }
+            .setNegativeButton(R.string.dialog_cancel, null)
+            .show()
+    }
+
+    /**
+     * 元素 10b（uifix2 任务 C-2）：Portal 地址常驻状态 —— 未保存=红「尚未保存地址」、
+     * 已保存=绿「已保存portal:<地址>」（用户给的格式逐字照做：`portal:` 小写、冒号后无空格）。
+     *
+     * 「是否已保存」的判据 = **存储里真的有 `srun_portal_v1` 这个键**，取值用
+     * `KeyValueStore.getString(<键>)`（真机 = 同一份 SharedPreferences）。
+     * 为什么不拿 `PortalConfig.readHost(store)` 当判据：它在键缺失时会**回落到默认地址**
+     * （storage/PortalConfig.kt:69-71），用它判「有没有保存过」会把「从没保存过」显示成
+     * 「已保存portal:202.194.116.116」，与用户要的语义正好相反。
+     *
+     * 「常驻」怎么保证：本方法在 `render()` 末尾无条件调用 → 启动、保存后、切换 WiFi 后、
+     * 权限变化后……任何一次界面刷新都会同步刷新它。因此「保存成功后立即刷新」是自然满足的
+     * （保存按钮的 onClick 末尾已经有 `render()`）。整段读取用 runCatching 包住：
+     * 存储异常不能让渲染崩掉（此时按「尚未保存」显示，宁可保守也不误报「已保存」）。
+     */
+    private fun renderPortalStatus() {
+        val status: TextView = findViewById(R.id.text_portal_status)
+        val portalKey = top.ytu.srunautologin.storage.PortalConfig.KEY_PORTAL
+        val savedHost = runCatching { portalStore.getString(portalKey) }.getOrNull()
+        if (savedHost.isNullOrBlank()) {
+            status.text = getString(R.string.portal_status_unsaved)
+            applyStateColor(status, COLOR_STATUS_FAIL)   // 红 0xFFC62828
+        } else {
+            status.text = getString(R.string.portal_status_saved, savedHost)
+            applyStateColor(status, COLOR_STATUS_OK)     // 绿 0xFF2E7D32
         }
     }
 
@@ -605,27 +837,25 @@ class MainActivity : Activity() {
         // 降级态（权限被拒但仍能登录当前 WiFi）单列一色，避免它被误读成「已授权」或「完全不可用」。
         textPermissionState.setTextColor(permissionStateColor(s))
 
+        // 【uifix2 任务 C-1】内嵌 CheckBox 列表 → 「当前选择 + 数量」摘要（WiFi 选择已改到弹出对话框）。
+        // 保留 ssid_list 容器本身（id 与位置不变，仍是元素 5 的必需 id / UI-1 断言要求），只换内容。
+        // 不再逐项渲染 CheckBox 的三条理由（完整版见 fix-report.md 任务 C-1）：
+        //  1) 模型是「选一个 WiFi」（ConfigUiState.selectedSsid 是单值），CheckBox 列表天然表达「多选」，语义不符；
+        //  2) 周边 WiFi 上百个时内嵌列表会把下面的权限区/保存/状态区推得极远（insets-fix1 曾被迫截断到 20 项）；
+        //  3) 选择入口改为 btn_choose_wifi（单选对话框）后，原地只需要告诉用户「现在选中的是哪个」。
         ssidList.removeAllViews()
-        // insets-fix1（B-2）：周边 WiFi 在权限授予后可能有上百个。全量渲染会让 ssid_list 变得极长，
-        // 把下面的权限区/保存/状态区推到很远，用户以为「界面就这些」。
-        // 策略：最多渲染 SSID_LIST_MAX_VISIBLE 项，其余只报数量（不丢信息：数字来自同一个 s.ssidList）。
-        val visibleSsidList = s.ssidList.take(SSID_LIST_MAX_VISIBLE)
-        for (ssid in visibleSsidList) {
-            val check = CheckBox(this)
-            check.text = ssid
-            check.isChecked = ssid == s.selectedSsid
-            check.setOnClickListener {
-                viewModel.selectSsid(ssid)
-                render()
-            }
-            ssidList.addView(check)
+        val selectedLine = TextView(this)
+        selectedLine.text = if (s.selectedSsid.isNullOrBlank()) {
+            getString(R.string.ssid_selected_none)
+        } else {
+            getString(R.string.ssid_selected_current, s.selectedSsid)
         }
-        val hiddenSsidCount = s.ssidList.size - visibleSsidList.size
-        if (hiddenSsidCount > 0) {
-            // 截断提示：一个普通 TextView（非可勾选），明确告诉用户「还有 N 个没显示」而不是悄悄少给
-            val more = TextView(this)
-            more.text = getString(R.string.ssid_list_more, hiddenSsidCount)
-            ssidList.addView(more)
+        ssidList.addView(selectedLine)
+        if (s.ssidList.isNotEmpty()) {
+            // 数量提示：告诉用户「选择列表」里现在有多少个可选（数字与对话框同源，都取 s.ssidList）
+            val countLine = TextView(this)
+            countLine.text = getString(R.string.ssid_list_count, s.ssidList.size)
+            ssidList.addView(countLine)
         }
         if (s.ssidList.isEmpty() && s.degraded) {
             val tv = TextView(this)
@@ -640,6 +870,10 @@ class MainActivity : Activity() {
             tv.setTextColor(0xFFF57F17.toInt())
             ssidList.addView(tv)
         }
+
+        // 【uifix2 任务 C-2】Portal 地址常驻状态：每次 render() 都同步刷新
+        //（启动 / 保存 Portal 后 / 切换 WiFi / 权限变化……任何一次界面刷新都会带上它）
+        renderPortalStatus()
     }
 
     /**
