@@ -124,4 +124,7 @@
     <string name="account_delete">删除</string>
     <!-- 删除确认：%1$s=对应账户名称、%2$s=对应网络名称；问号是英文半角 '?'（用户原文如此） -->
     <string name="account_delete_confirm">确认要删除%1$s和相应的%2$s吗?</string>
+    <!-- acctfix1（真机反馈）：删除成功的专用提示；%1$s=备注名(label)、%2$s=网络名(ssid)。
+         只含 label 与 ssid，绝不带账号/密码；与 save_done（「已保存：…」）是两条独立文案。 -->
+    <string name="account_delete_done">已删除：%1$s ↔ %2$s</string>
 </resources>

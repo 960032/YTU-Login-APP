@@ -761,35 +761,50 @@ class MainActivity : Activity() {
      *  2) 「删除」是**同一行里的另一个 View**（TextView），只挂 `setOnClickListener`；
      *     行容器**没有**任何点击监听器，因此点「删除」不会传导到 CheckBox
      *     （View 的点击事件按命中链分发给被点中的那个 View）；
-     *  3) 删除完成后 `renderInto()` 重建整份视图并按存储顺序重排，
+     *  3) 刷新时按存储顺序重建整行并按存储顺序重排，
      *     重建期间用 `checkbox.tag = "rendering"` 做「这是渲染态、不是用户操作」的标记，
      *     避免 setChecked 触发监听器误写存储；
      *  4) 点「删除」先弹**确认框**（独立对话框），取消则无任何写操作。
+     *
+     * 【刷新方式（acctfix1 任务，真机反馈「删除后列表不刷新」）】
+     *  旧实现（已废）：**已显示**的对话框上反复调 `dialog.setView(column)`。
+     *  `AlertDialog` 的内容面板是「不请求布局」的容器（`MEASURED_STATE_MASK` 关闭），
+     *   `setView()` 只是换掉面板里的子 View，**不会**触发窗口重新测量/布局
+     *  → 屏幕上仍是旧行。因此现在改为：**每次刷新都重建一个全新的对话框并 `show()`**，
+     *  先 `dismiss()` 旧的那一个。这条路径与首次展示完全相同（measure → layout 必然发生），
+     *  是本方法里**唯一**被真机验证过必然生效的展示路径，不依赖任何「手动触发重布局」的技巧。
+     *  同一时刻至多一个本弹窗存活（`activeDialog` 单例引用），不会叠窗。
      */
     private fun chooseAccountFromDialog() {
         val store = SrunStorage.accountStore(this)
-        // 读一次（顺带完成 v1 → v2 迁移）；读失败/无数据时给出明确提示，不弹空白框
-        val accounts = runCatching { store.list() }.getOrElse {
-            saveFailed(it)
-            emptyList()
+
+        // 名单弹窗 / 空列表提示弹窗 的当前实例（同一时刻至多一个）。
+        // 注意：Kotlin 的**局部函数**不能前向引用。这里的依赖是环状的：
+        //   renderInto（刷新）→ buildListDialog（建弹窗）→ buildAccountRow 的回调 → renderInto
+        // 因此回调用 lateinit var 承载、在弹窗 show() 之前赋值：回调只可能在用户点勾选/删除时触发，
+        // 那时它必定已初始化（未初始化会抛异常，不会静默失效）。
+        var activeDialog: AlertDialog? = null
+        lateinit var renderInto: () -> Unit
+
+        // 关掉当前弹窗、换成新的那一个并展示（先关后开，避免两个弹窗叠加）
+        fun showAccountDialog(next: AlertDialog) {
+            val old = activeDialog
+            activeDialog = next
+            old?.dismiss()
+            next.show()
         }
-        if (accounts.isEmpty()) {
-            AlertDialog.Builder(this)
+
+        /** 展示「还没有保存的账号」提示（删除最后一条后走这里，而不是留一个空弹窗）。 */
+        fun showEmptyDialog() {
+            showAccountDialog(AlertDialog.Builder(this)
                 .setTitle(R.string.dialog_account_title)
                 .setMessage(R.string.account_empty)
                 .setPositiveButton(R.string.dialog_cancel, null)
-                .show()
-            return
+                .create())
         }
 
-        val dialog = AlertDialog.Builder(this)
-            .setTitle(R.string.dialog_account_title)
-            .setNegativeButton(R.string.dialog_cancel, null)
-            .create()
-
-        // 重建整个列表（勾选/删除之后调用 → 界面立即反映存储的真实状态）
-        fun renderInto() {
-            val current = runCatching { store.list() }.getOrElse { emptyList() }
+        /** 列表弹窗：每次都新建、重新 `show()`（见上方注释的「刷新方式」）。 */
+        fun buildListDialog(current: List<SavedAccount>): AlertDialog {
             val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
             // 弹窗内计数反馈（用户要求：勾选后要有可见反馈）
             val counter = TextView(this).apply {
@@ -799,11 +814,34 @@ class MainActivity : Activity() {
             }
             column.addView(counter)
             current.forEach { account -> column.addView(buildAccountRow(store, account) { renderInto() }) }
-            dialog.setView(column)
+            return AlertDialog.Builder(this)
+                .setTitle(R.string.dialog_account_title)
+                .setNegativeButton(R.string.dialog_cancel, null)
+                .setView(column)
+                .create()
         }
 
-        renderInto()
-        dialog.show()
+        // 重建并重新展示列表（删除 / 勾选之后调用 → 界面立即反映存储的真实状态）。
+        // 列表变空时改显示「还没有保存的账号」提示。
+        renderInto = {
+            val current = runCatching { store.list() }.getOrElse {
+                // 刷新时读存储失败：与首读同样如实报错，不静默显示成空列表（那会误导成「被删光了」）
+                saveFailed(it)
+                emptyList()
+            }
+            if (current.isEmpty()) showEmptyDialog() else showAccountDialog(buildListDialog(current))
+        }
+
+        // 首次展示：读一次（顺带完成 v1 → v2 迁移）；读失败/无数据时给出明确提示，不弹空白框
+        val accounts = runCatching { store.list() }.getOrElse {
+            saveFailed(it)
+            emptyList()
+        }
+        if (accounts.isEmpty()) {
+            showEmptyDialog()
+            return
+        }
+        showAccountDialog(buildListDialog(accounts))
     }
 
     /**
@@ -877,7 +915,8 @@ class MainActivity : Activity() {
                     if (label != null && store.findByName(label) == null) repo.delete(label)
                 }
                 afterChange()      // 刷新弹窗内容（条数与勾选计数同步变化）
-                toast(getString(R.string.save_done, account.label, account.ssid))
+                // acctfix1 任务 B：删除成功用**删除专用**文案（原先误用了「已保存：…」的 save_done）
+                toast(getString(R.string.account_delete_done, account.label, account.ssid))
             }
             .setNegativeButton(R.string.dialog_cancel, null)
             .show()
