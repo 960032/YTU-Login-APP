@@ -23,3 +23,17 @@ config.json
 *.jks
 *.hprof
 output.json
+
+# --- signfix1：唯一的例外，允许提交 debug keystore ---
+# 取舍说明（改动前请读完）：
+#   用户故障 = 覆盖安装失败，已实测的原因之一是「前后签名不一致」。本地构建与 CI 构建必须用**同一把钥匙**；
+#   debug keystore 若继续留在忽略列表里，CI 每次 checkout 都拿不到它、只能自己新生成一把，
+#   于是不同机器/不同时间构建出的 APK 签名各不相同，故障照旧。
+#   代价评估：进入仓库的是 **debug** key，口令 android/androiddebugkey 是 Android 工具的公开默认值，
+#   它不保护任何敏感信息（APK 依旧 debuggable）。真实风险只有一个：任何人都能用它签出与你同签名的
+#   debug APK —— 对 debug 场景可接受。
+#   将来正式发布必须换 release key 且**不要提交**：改走环境变量通道注入（见 app/build.gradle.kts 的
+#   SRUN_KEYSTORE_FILE / SRUN_KEYSTORE_PASSWORD / SRUN_KEY_PASSWORD / SRUN_KEY_ALIAS），并由 CI 用
+#   GitHub Secrets 提供。上面的 *.keystore / *.jks 规则继续忽略 release key；下面这条否定规则只按
+#   精确路径放行 keystore/debug.keystore，对任何其它 keystore 文件均不放行。
+!keystore/debug.keystore
