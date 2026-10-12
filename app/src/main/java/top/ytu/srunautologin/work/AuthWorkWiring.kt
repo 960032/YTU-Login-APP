@@ -228,6 +228,12 @@ object AuthWorkWiring {
     /** 开机/网络恢复后调用：注册周期保底并排一次尽快认证。 */
     fun onTrigger(context: Context, reason: String, initialDelayMillis: Long) {
         val appContext = context.applicationContext
+        // 【C4 覆盖检查：入口 2/7】boot / app-start / network 三条通道共用本入口。
+        // 停用时**直接返回**：不注册周期保底、不排认证任务（用户要求「用户启用后才执行后台任务」）。
+        if (!MorningAuthRuntime.isEnabled(appContext)) {
+            progress(appContext, "onTrigger($reason)：自动登录已停用 → 直接返回（不排期）")
+            return
+        }
         try {
             scheduler(appContext).ensurePeriodic()
             scheduler(appContext).enqueueAuthReplacing(initialDelayMillis, reason)

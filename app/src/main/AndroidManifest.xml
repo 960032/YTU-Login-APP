@@ -11,7 +11,15 @@
   **明确不加**：AccessibilityService（BIND_ACCESSIBILITY_SERVICE）、悬浮窗（SYSTEM_ALERT_WINDOW）、
   QUERY_ALL_PACKAGES、READ_CALL_LOG / READ_SMS / READ_CONTACTS、POST_NOTIFICATIONS
   （本版本不发送任何通知，故不申请；理由见 artifacts/android-ci/ci-report.md）。
-  本版本**不使用前台服务**（无 FOREGROUND_SERVICE 权限、无前台服务类型声明）。
+  【morning1 任务新增（用户新需求：常驻通知 + 每日 6:00 精确唤醒）】
+      - POST_NOTIFICATIONS             ← API 33+ 显示常驻通知的运行时权限（启用开关时申请，被拒则界面提示）
+      - FOREGROUND_SERVICE             ← 前台服务通用权限（API 28+ 必需）
+      - FOREGROUND_SERVICE_DATA_SYNC   ← 前台服务类型权限（API 34+ 强制：类型与权限必须同时声明）
+      - SCHEDULE_EXACT_ALARM           ← API 31+ 精确闹钟（用户可在系统「闹钟与提醒」里关闭；
+                                           未授权时降级为 setAndAllowWhileIdle 并记日志，不静默失败）
+  【前台服务类型选择依据】dataSync：本服务只做「与服务器同步登录状态」的常驻通知；
+     不用 specialUse（需额外 <property> 子类型声明 + Play 人工审核，本应用完全可用标准类型），
+     不用 shortService（约 3 分钟上限，与「待机时常驻通知」冲突）。详见 work/MorningAuthForegroundService.kt 的类注释。
 
   明文 HTTP（crashfix1 任务 B）：
     targetSdk = 36 → Android 9（API 28）起 cleartextTrafficPermitted 默认 false。SRun 门户是纯 http://
@@ -23,6 +31,13 @@
 
     <!-- 本任务新增（B4 触发点 1：开机自启） -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+
+    <!-- 既有：联网与网络状态 -->
+    <!-- morning1 任务新增：常驻通知 + 前台服务 + 精确闹钟 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
 
     <!-- 既有：联网与网络状态 -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -90,6 +105,27 @@
             android:name="top.ytu.srunautologin.work.AuthJobService"
             android:exported="false"
             android:permission="android.permission.BIND_JOB_SERVICE" />
+
+        <!--
+          morning1：常驻通知的前台服务（用户要求「应用在后台待机时推送常驻通知」）。
+          - exported=false：只允许本应用启动；
+          - foregroundServiceType="dataSync"：API 34+ 必须显式声明类型，且类型权限
+            FOREGROUND_SERVICE_DATA_SYNC 已在上方声明；
+          - 本服务**不做认证**，只负责「常驻通知 + 存活」；认证仍由 AuthJobService 执行。
+        -->
+        <service
+            android:name="top.ytu.srunautologin.work.MorningAuthForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
+
+        <!--
+          morning1：每日 06:00 / +10 分钟重试闹钟的回调。
+          exported=false：只接收本应用自己发的 PendingIntent（不需要外部投递）。
+        -->
+        <receiver
+            android:name="top.ytu.srunautologin.work.MorningAlarmReceiver"
+            android:enabled="true"
+            android:exported="false" />
 
         <!--
           注意（Android 7+ 隐式广播限制）：CONNECTIVITY_ACTION **不在**豁免清单里，

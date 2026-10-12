@@ -39,7 +39,16 @@ object UiSpec {
         UiElement(7, "保存", "Button", "btn_save", "B2"),
         UiElement(8, "状态显示区", "TextView", "text_status", "B5"),
         UiElement(9, "立即登录", "Button", "btn_login_now", "B5/B8"),
-        UiElement(10, "Portal 地址（门户地址可配置）", "EditText+Button", "edit_portal/btn_save_portal", "用户需求：地址可配置")
+        UiElement(10, "Portal 地址（门户地址可配置）", "EditText+Button", "edit_portal/btn_save_portal", "用户需求：地址可配置"),
+        // 【元素 11（morning1 任务）】用户新需求：每天 6:00 自动登录 + 常驻通知 + 应用内启停开关 + 权限描述文本。
+        // 追加在末尾，**原有 1..10 的编号与含义一律不变**（UI-1 是「必需元素子集 + 数量下界」断言，不重排）。
+        UiElement(
+            11,
+            "早上自动登录：启停开关 + 状态行 + 自启动权限文案 + 一键跳转系统设置",
+            "Button+TextView+TextView+Button",
+            "btn_toggle_auto_login/text_morning_status/text_autostart_notice/btn_open_autostart_settings",
+            "用户需求：点击(启用/停用)自动登录 + 登录任务需要自启动权限，该权限用于每天早上的自动唤起。"
+        )
     )
 
     /** 状态区必须能表达的信息类别（B5：成功/失败原因/时间）。 */

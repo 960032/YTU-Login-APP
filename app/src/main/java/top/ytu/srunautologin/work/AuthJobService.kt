@@ -31,6 +31,24 @@ class AuthJobService : JobService() {
         val reason = jobIdName(jobId)
         AuthWorkWiring.progress(this, "onStartJob: jobId=$jobId reason=$reason")
 
+        // 【A5：与早上例程不冲突 —— 共享计数 + 让路】
+        // 周期兜底（15 分钟）与闹钟链路（6:00 起每 10 分钟）可能撞在同一时刻。
+        // 早上的尝试已经记过账（MorningStateStore，进程间共享），因此：
+        //   ① 正处于 06:00–07:00 且刚刚（<5 分钟）跑过一次 → 本次让路，不再打一次 Portal；
+        //   ② 07:00 之后 → 早上例程当天已收工（闹钟已排到明天），周期兜底恢复原行为。
+        if (periodic && AuthWorkWiring.keyValueStore(this).getString(MorningStateStore.KEY_ENABLED) == "true") {
+            val morningNow = System.currentTimeMillis()
+            if (MorningAutoLoginRuntime.inWindow(morningNow) &&
+                MorningAuthRuntime.isMorningAttemptInFlight(this, morningNow)
+            ) {
+                AuthWorkWiring.progress(
+                    this,
+                    "周期兜底让路：早上例程刚跑过（10 分钟内的尝试已在早上记账里）→ 本次不重复认证"
+                )
+                return false
+            }
+        }
+
         worker.execute {
             // 结果与「是否需要系统重投」解耦，避免把「到上限停止」误当成失败重试
             val needSystemRetry = try {

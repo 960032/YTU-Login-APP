@@ -41,6 +41,12 @@ class BootCompletedReceiver : BroadcastReceiver() {
         }
         AuthWorkWiring.progress(ctx, "trigger: $action")
 
+        // 【C4 覆盖检查：入口 3/7】开机自启 —— 停用时直接返回，不排任何后台任务。
+        if (!MorningAuthRuntime.isEnabled(ctx)) {
+            AuthWorkWiring.progress(ctx, "trigger: $action 但自动登录已停用 → 直接返回")
+            return
+        }
+
         // 周期保底先注册（15 分钟），再排一次尽快执行的认证：
         // 开机后用户可能已经连上校园网，也可能还没连上——都交给 AuthFlow 判断。
         AuthWorkWiring.scheduler(ctx).ensurePeriodic()
@@ -75,6 +81,11 @@ class NetworkChangeReceiver : BroadcastReceiver() {
         val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
         if (!NetworkWatcher.isOnWifi(cm)) {
             AuthWorkWiring.progress(ctx, "trigger: CONNECTIVITY_ACTION（非 WiFi，忽略）")
+            return
+        }
+        // 【C4 覆盖检查：入口 4/7】WiFi 连接变化（动态广播）—— 停用时直接返回。
+        if (!MorningAuthRuntime.isEnabled(ctx)) {
+            AuthWorkWiring.progress(ctx, "trigger: CONNECTIVITY_ACTION 但自动登录已停用 → 直接返回")
             return
         }
         AuthWorkWiring.progress(ctx, "trigger: CONNECTIVITY_ACTION（已连上 WiFi）")
@@ -141,6 +152,11 @@ object NetworkWatcher {
             .build()
         val callback = object : ConnectivityManager.NetworkCallback() {
             private fun onWifiEvent(what: String) {
+                // 【C4 覆盖检查：入口 5/7】NetworkCallback —— 停用时直接返回。
+                if (!MorningAuthRuntime.isEnabled(ctx)) {
+                    AuthWorkWiring.progress(ctx, "trigger: NetworkCallback($what) 但自动登录已停用 → 直接返回")
+                    return
+                }
                 AuthWorkWiring.progress(ctx, "trigger: NetworkCallback($what)")
                 AuthWorkWiring.scheduler(ctx).enqueueAuth(
                     delayMillis = NetworkChangeReceiver.WIFI_CONNECT_SETTLE_MILLIS,

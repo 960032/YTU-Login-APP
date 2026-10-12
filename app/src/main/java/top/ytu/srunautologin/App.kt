@@ -3,6 +3,9 @@ package top.ytu.srunautologin
 import android.app.Application
 import top.ytu.srunautologin.work.AuthJobs
 import top.ytu.srunautologin.work.AuthWorkWiring
+import top.ytu.srunautologin.work.MorningAuthForegroundService.Companion.startMorningNotificationService
+import top.ytu.srunautologin.work.MorningAuthRuntime
+import top.ytu.srunautologin.work.MorningStateStore
 import top.ytu.srunautologin.work.NetworkChangeReceiver
 import top.ytu.srunautologin.work.NetworkWatcher
 
@@ -24,6 +27,13 @@ class App : Application() {
     override fun onCreate() {
         super.onCreate()
         try {
+            // 【C4 覆盖检查：入口 1/7】应用启动 —— 先把「启停开关」问一遍：
+            // 停用时**一个后台入口都不注册、不排期**（用户要求「用户启用后才执行后台任务」）。
+            if (!MorningAuthRuntime.isEnabled(this)) {
+                AuthWorkWiring.progress(this, "App.onCreate: 自动登录已停用 → 不注册网络监听、不排期（开关停用时所有后台入口直接返回）")
+                return
+            }
+
             // 触发点 2：WiFi 连接变化（两条通道都注册）
             NetworkChangeReceiver.register(this)
             NetworkWatcher.start(this)
@@ -38,6 +48,14 @@ class App : Application() {
                 this,
                 "App.onCreate: 已注册网络监听 + 周期保底（间隔 ${AuthJobs.PERIODIC_INTERVAL_MINUTES} 分钟）"
             )
+
+            // 【C4 覆盖检查：入口 7/7】进程重建时如果开关是启用状态，把常驻通知恢复出来
+            // （用户关掉应用后进程被杀，通知也随之消失；下次进程起来要重新显示，否则用户以为没在工作）。
+            // 【C4 覆盖检查：入口 7/7】进程重建时若开关仍为启用，恢复常驻通知
+            // （进程被杀后通知会消失，下次进程起来必须重新显示，否则用户以为没在工作）。
+            if (MorningAuthRuntime.isEnabled(this)) {
+                startMorningNotificationService()
+            }
         } catch (e: Throwable) {
             // 任何初始化异常都不能让应用起不来：记录后继续
             AuthWorkWiring.progress(this, "App.onCreate 初始化失败：${e.javaClass.simpleName}: ${e.message}")
