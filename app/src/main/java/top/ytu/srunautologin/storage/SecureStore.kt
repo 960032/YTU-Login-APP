@@ -77,7 +77,14 @@ class SecureStore(private val keyProvider: SecretKeyProvider) {
         } catch (e: ProviderException) {
             // Keystore 也可能抛 ProviderException（RuntimeException 子类，不是 GeneralSecurityException 子类）：
             // 例如硬件密钥不可用、密钥被系统失效。同样收敛并保留 cause。
+            // **捕获顺序**：ProviderException 必须先于下面的 RuntimeException，否则该分支永远不会命中。
             throw SecureStoreException("加密失败：Keystore 提供者异常（${e.javaClass.simpleName}: ${e.message}）", e)
+        } catch (e: RuntimeException) {
+            // keystore-fix2 修复：Cipher 未正确初始化时 doFinal() 抛 IllegalStateException("Not initialized")；
+            // 它是 RuntimeException 子类，既不是 GeneralSecurityException 也不是 ProviderException，
+            // 原先会直接穿透：调用方只能看到 "Not initialized"、看不出根因，未兜住的调用点还可能闪退。
+            // 这里与 decrypt() 同口径收敛成 SecureStoreException 并保留 cause。
+            throw SecureStoreException("加密失败：运行时异常（${e.javaClass.simpleName}: ${e.message}）", e)
         }
 
         val out = ByteArray(HEADER_LENGTH + IV_LENGTH + cipherText.size)
@@ -100,12 +107,20 @@ class SecureStore(private val keyProvider: SecretKeyProvider) {
         }
         val iv = payload.copyOfRange(HEADER_LENGTH, HEADER_LENGTH + IV_LENGTH)
         val cipherText = payload.copyOfRange(HEADER_LENGTH + IV_LENGTH, payload.size)
-        val cipher = Cipher.getInstance(TRANSFORMATION)
         return try {
+            // Cipher.getInstance 一并放进 try：与 encrypt() 同口径，取算法实现失败时也能收敛成可见错误。
+            val cipher = Cipher.getInstance(TRANSFORMATION)
             cipher.init(Cipher.DECRYPT_MODE, keyProvider.getOrCreate(), GCMParameterSpec(TAG_BITS, iv))
             cipher.doFinal(cipherText)
         } catch (e: GeneralSecurityException) {
-            throw SecureStoreException("GCM 认证失败：密文被篡改或密钥不匹配", e)
+            throw SecureStoreException("GCM 认证失败：密文被篡改或密钥不匹配（${e.javaClass.simpleName}: ${e.message}）", e)
+        } catch (e: ProviderException) {
+            // 捕获顺序：ProviderException 必须先于 RuntimeException（同 encrypt()）。
+            throw SecureStoreException("解密失败：Keystore 提供者异常（${e.javaClass.simpleName}: ${e.message}）", e)
+        } catch (e: RuntimeException) {
+            // keystore-fix2 修复：原先 decrypt() 只捕 GeneralSecurityException，IllegalStateException 等
+            // 运行时异常同样会穿透；此处补齐并保留 cause。
+            throw SecureStoreException("解密失败：运行时异常（${e.javaClass.simpleName}: ${e.message}）", e)
         }
     }
 

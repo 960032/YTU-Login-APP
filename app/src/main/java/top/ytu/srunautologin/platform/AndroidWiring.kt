@@ -95,6 +95,11 @@ class AndroidKeystoreSecretKeyProvider(
     /** 生成新 KEK：固定别名 + [buildKeySpec] 的冻结参数。 */
     private fun generateKey(): SecretKey {
         val generator = KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES, PROVIDER)
+        // keystore-fix2 修复：本行曾在某次编辑中被误删，使得 generateKey() 在**未初始化**的 KeyGenerator 上调用，
+        // 生成出的密钥不带「AES-256 | GCM | NoPadding | setRandomizedEncryptionRequired(false)」冻结参数；
+        // 随后 Cipher.init 无法为该密钥建立有效操作、Cipher.doFinal 抛 IllegalStateException("Not initialized")
+        // （真机表现：「保存失败,"Not initialized"」）。此处按冻结参数 [buildKeySpec] 初始化后再生成。
+        generator.init(buildKeySpec())
         val key = generator.generateKey()
         if (!keyRegenAttempted) {
             // 兜底：刚生成的密钥若仍「检测不通过」，说明是检测 API 失效而不是密钥真不合格——记一次日志后
