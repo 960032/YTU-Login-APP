@@ -9,7 +9,7 @@
     <!-- 元素 1：账号 -->
     <string name="label_username">账号</string>
     <!-- uifix2（任务 C-3）：用户逐字要求的文案。注意用户写的是「登**陆**账户」（非「登录」），逐字采用。 -->
-    <string name="hint_username">登陆账户</string>
+    <string name="hint_username">登录账户</string>
 
     <!-- 元素 2：密码 -->
     <string name="label_password">密码</string>
@@ -71,7 +71,7 @@
     <!-- 元素 10：Portal（门户）地址（不同校区地址不同，可自行输入并保存）
          uifix2（任务 C-3）：用户逐字要求：原「Portal地址(校园网门户,按校区填写)」→「网络门户地址」 -->
     <string name="label_portal">网络门户地址</string>
-    <string name="hint_portal">如 202.194.116.116（可带 http:// 前缀）</string>
+    <string name="hint_portal">如 202.194.116.116</string>
     <string name="btn_save_portal">保存 Portal 地址</string>
     <string name="save_portal_done">已保存 Portal 地址：%1$s</string>
     <!-- 元素 10b（uifix2 任务 C-2）：Portal 地址常驻状态显示。
