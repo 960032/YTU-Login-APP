@@ -74,6 +74,11 @@ class AndroidAuthRunEnv(
     private val appContext = context.applicationContext
     private val credentials = StorageCredentialLookup(SrunStorage.credentialRepository(appContext))
     private val wifiMap = SrunStorage.wifiAccountMap(appContext)
+    /**
+     * 【accountsel1 任务 C 段】v2 账号列表（含勾选状态）：早上链路里「账号是否生效」以它为准。
+     * 读它会触发一次 v1 → v2 迁移（幂等），因此升级后第一次跑早上任务时老账号也已在 v2 里。
+     */
+    private val accountStore = SrunStorage.accountStore(appContext)
     private val wifiSnapshot = WifiSnapshotCore(AndroidWifiSource(appContext), AndroidWifiPermissionFlow(appContext))
 
     override fun currentSsid(): String? = wifiSnapshot.currentSsid()
@@ -82,6 +87,8 @@ class AndroidAuthRunEnv(
         val flow = AuthFlow(
             credentials = credentials,
             wifiMap = MapWifiAccountLookup(wifiMap),
+            // 【C 段】把「已勾选」判定接进认证链路：未勾选的账号 ⇒ AuthFlow 直接跳过（不发请求）
+            enabledAccounts = accountStore,
             wifiSnapshot = CoreWifiSnapshotPort(wifiSnapshot),
             transport = AndroidAuthTransportFactory.create(),
             portalProvider = portalProviderFrom(appContext)

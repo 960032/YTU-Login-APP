@@ -12,6 +12,7 @@ import android.os.Build
 import android.os.IBinder
 import top.ytu.srunautologin.R
 import top.ytu.srunautologin.platform.SrunStorage
+import top.ytu.srunautologin.storage.AccountStore
 import top.ytu.srunautologin.storage.WifiAccountMap
 
 /**
@@ -148,11 +149,21 @@ class MorningAuthForegroundService : Service() {
         return ctx.getString(R.string.morning_notification_text, account, ssid)
     }
 
-    /** 已保存的登录账号名（备注名）：优先「当前选中」的凭据，其次第一条；一条都没有时给占位文案。 */
+    /**
+     * 已保存的登录账号名（备注名）：**accountsel1（C 段）起改读 v2 账号列表**——
+     * 优先「当前选中」的账号，其次第一条；一条都没有时给占位文案。
+     *
+     * 为什么改：v2 是当前读路径，且这里有「勾选」概念——若仍读 v1（`credentials_v1`），
+     * 会出现「通知里显示着一个已被用户取消勾选/已删除的账号」这种与事实不符的显示。
+     *
+     * 通知里**只允许出现备注名**（label）：账号/密码一律不进通知、不进日志（D 段自查项）。
+     */
     private fun savedAccountName(ctx: Context): String {
-        val repo = SrunStorage.credentialRepository(ctx)
-        val credential = repo.selected() ?: repo.list().firstOrNull()
-        return credential?.label?.takeIf { it.isNotBlank() }
+        val store = SrunStorage.accountStore(ctx)
+        val accounts = store.list()
+        val picked = store.selectedLabel()?.let { sel -> accounts.firstOrNull { it.label == sel } }
+            ?: accounts.firstOrNull()
+        return picked?.label?.takeIf { it.isNotBlank() }
             ?: ctx.getString(R.string.morning_notification_no_account)
     }
 

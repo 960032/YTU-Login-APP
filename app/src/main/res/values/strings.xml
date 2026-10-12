@@ -113,4 +113,15 @@
     <string name="morning_notification_text">已保存登录账号:%1$s,将登录网络:%2$s</string>
     <string name="morning_channel_name">自动连接</string>
     <string name="morning_channel_desc">显示自动连接的工作状态（常驻，不可消除）</string>
+
+    <!-- ================= 元素 12：账号选择（accountsel1 任务，用户原话）=================
+         按钮「账号选择」→ 弹窗标题**逐字**「选择生效账号」；每行：勾选框 → 账户（偏左） → 网络（偏右） → 蓝色「删除」（最右）；
+         删除确认框**逐字**「确认要删除<对应账户名称>和相应的<对应网络名称>吗?」（英文半角问号 '?'，逐字不改）。 -->
+    <string name="btn_choose_account">账号选择</string>
+    <string name="dialog_account_title">选择生效账号</string>
+    <string name="account_empty">还没有保存的账号，请先在下方填写并保存</string>
+    <string name="account_selected_count">已勾选 %1$d 个</string>
+    <string name="account_delete">删除</string>
+    <!-- 删除确认：%1$s=对应账户名称、%2$s=对应网络名称；问号是英文半角 '?'（用户原文如此） -->
+    <string name="account_delete_confirm">确认要删除%1$s和相应的%2$s吗?</string>
 </resources>

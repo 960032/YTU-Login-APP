@@ -111,6 +111,15 @@
             android:layout_height="wrap_content"
             android:text="@string/btn_choose_wifi" />
 
+        <!-- 元素 12（accountsel1 任务）：用户要求「添加账号选择按钮，类似于已添加的 wifi 选择，
+             点击后弹出弹框」。因此按钮放在「选择列表」（WiFi 选择）旁边；点击 → 弹出自建多选列表
+             （勾选框 + 账户 + 网络 + 蓝色「删除」），实现见 MainActivity.chooseAccountFromDialog()。 -->
+        <Button
+            android:id="@+id/btn_choose_account"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:text="@string/btn_choose_account" />
+
         <LinearLayout
             android:id="@+id/ssid_list"
             android:layout_width="match_parent"

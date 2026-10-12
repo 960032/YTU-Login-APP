@@ -39,6 +39,8 @@ import top.ytu.srunautologin.work.MorningAuthForegroundService.Companion.stopMor
 import top.ytu.srunautologin.work.MorningAuthRuntime
 import top.ytu.srunautologin.work.MorningStateStore
 import top.ytu.srunautologin.work.AndroidAuthScheduler
+import top.ytu.srunautologin.storage.AccountStore
+import top.ytu.srunautologin.storage.SavedAccount
 import top.ytu.srunautologin.storage.SecureStoreException
 import java.io.File
 
@@ -406,6 +408,9 @@ class MainActivity : Activity() {
         authFlow = AuthFlow(
             credentials = RepositoryCredentialLookup(SrunStorage.credentialRepository(this)),
             wifiMap = MapWifiAccountLookup(SrunStorage.wifiAccountMap(this)),
+            // 【accountsel1 任务 C 段】把「已勾选」判定接进前台认证链路：
+            // 未勾选的账号在 AuthFlow 里直接 Skip（不发任何请求）。真机实现 = storage.AccountStore。
+            enabledAccounts = SrunStorage.accountStore(this),
             wifiSnapshot = CoreWifiSnapshotPort(
                 WifiSnapshotCore(AndroidWifiSource(this), AndroidWifiPermissionFlow(this))
             ),
@@ -549,16 +554,30 @@ class MainActivity : Activity() {
                     // 加密存储在真机上可能拒绝加密（Keystore 抛 InvalidAlgorithmParameterException 等）：
                     // SecureStore 已把底层异常收敛成 SecureStoreException，这里必须本地兜住——否则异常沿
                     // onClick 冒到主线程，就是本次真机闪退。写失败一律走 saveFailed（状态区 + 日志 + 提示）。
-                    val stored = runCatching { SrunStorage.credentialRepository(this).upsert(outcome.plan.credential) }
+                    // 【accountsel1 任务 A 段：保存语义 B】v2 是当前读路径 → **先写 v2**（以 SSID 为键：
+                    // 同 SSID 更新、新 SSID 新增），再把 v1 镜像写回（v1 保留作回滚余地，下次读时它不会再被迁回）。
+                    // 两步都在 runCatching 里：加密失败（Keystore 不可用）走 saveFailed，状态区可见，不闪退。
+                    val stored = runCatching {
+                        val ssid = outcome.plan.targetSsid
+                        val cred = outcome.plan.credential
+                        val store = SrunStorage.accountStore(this)
+                        val isNew = store.save(
+                            ssid = ssid,
+                            label = cred.label,
+                            username = cred.username,
+                            password = cred.password,
+                            enabled = true            // 界面新保存的账号默认参与早上 6:00 的网络匹配
+                        )
+                        // v1 镜像（CredentialRepository.upsert 已按 label 覆盖；select 保持「当前选中」一致）
+                        SrunStorage.credentialRepository(this).upsert(cred)
+                        SrunStorage.credentialRepository(this).select(cred.label)
+                        SrunStorage.wifiAccountMap(this).bind(ssid, cred.label)
+                        isNew
+                    }
                     if (stored.isFailure) {
                         saveFailed(stored.exceptionOrNull()!!)
                     } else {
-                        val bound = runCatching {
-                            SrunStorage.wifiAccountMap(this).bind(outcome.plan.targetSsid, outcome.plan.label)
-                            SrunStorage.credentialRepository(this).select(outcome.plan.label)
-                        }
-                        if (bound.isFailure) saveFailed(bound.exceptionOrNull()!!)
-                        else toast(getString(R.string.save_done, outcome.plan.label, outcome.plan.targetSsid))
+                        toast(getString(R.string.save_done, outcome.plan.label, outcome.plan.targetSsid))
                     }
                 }
             }
@@ -571,6 +590,9 @@ class MainActivity : Activity() {
         // 用 findViewById 直接取控件（不入实例字段）：本 Activity 的实例字段都是「onCreate 里 findViewById
         // 赋值、多处共用」的形式，而这个按钮只在 bindViews 里挂一次监听，没有共享需求。
         findViewById<Button>(R.id.btn_choose_wifi).setOnClickListener { chooseWifiFromDialog() }
+
+        // 元素 12（accountsel1 任务）：点「账号选择」→ 弹出「选择生效账号」多选列表（勾选/删除）。
+        findViewById<Button>(R.id.btn_choose_account).setOnClickListener { chooseAccountFromDialog() }
 
         // 元素 9：立即登录（B8 在 AuthFlow 内判定；SSID 不匹配时零请求）
         // 【uifix2 任务 A】点击后**不在主线程**做网络：整条链路（本机 IP 探测 + get_challenge + srun_portal
@@ -718,6 +740,144 @@ class MainActivity : Activity() {
                 dialog.dismiss()
                 render()
                 scrollTo(ssidList)
+            }
+            .setNegativeButton(R.string.dialog_cancel, null)
+            .show()
+    }
+
+    /**
+     * 元素 12（accountsel1 任务）：`账号选择` 按钮 → 弹出「选择生效账号」对话框。
+     *
+     * 需求（用户原话）逐条落点：
+     *  - 标题逐字「选择生效账号」→ R.string.dialog_account_title；
+     *  - 每行：**勾选框 → 账户（偏左） → 网络（偏右） → 「删除」（最右，蓝色字体）**
+     *    → 用 LinearLayout(horizontal) 自建行：CheckBox + TextView(weight=1) + TextView + TextView；
+     *  - **多选**（勾选任意数量）→ 因此**不能**用 setSingleChoiceItems（那是单选），改用 setView 自建列表；
+     *  - 「删除」点击 → 确认框「确认要删除<账户>和相应的<网络>吗?」→ 确认则删除并**刷新弹窗内容**；
+     *  - 空列表 → 不弹空白框，显示明确提示（R.string.account_empty）。
+     *
+     * 【「删除」点击与整行勾选互不干扰的做法】
+     *  1) CheckBox 的切换**只**通过 `checkbox.setOnCheckedChangeListener` 落到存储；
+     *  2) 「删除」是**同一行里的另一个 View**（TextView），只挂 `setOnClickListener`；
+     *     行容器**没有**任何点击监听器，因此点「删除」不会传导到 CheckBox
+     *     （View 的点击事件按命中链分发给被点中的那个 View）；
+     *  3) 删除完成后 `renderInto()` 重建整份视图并按存储顺序重排，
+     *     重建期间用 `checkbox.tag = "rendering"` 做「这是渲染态、不是用户操作」的标记，
+     *     避免 setChecked 触发监听器误写存储；
+     *  4) 点「删除」先弹**确认框**（独立对话框），取消则无任何写操作。
+     */
+    private fun chooseAccountFromDialog() {
+        val store = SrunStorage.accountStore(this)
+        // 读一次（顺带完成 v1 → v2 迁移）；读失败/无数据时给出明确提示，不弹空白框
+        val accounts = runCatching { store.list() }.getOrElse {
+            saveFailed(it)
+            emptyList()
+        }
+        if (accounts.isEmpty()) {
+            AlertDialog.Builder(this)
+                .setTitle(R.string.dialog_account_title)
+                .setMessage(R.string.account_empty)
+                .setPositiveButton(R.string.dialog_cancel, null)
+                .show()
+            return
+        }
+
+        val dialog = AlertDialog.Builder(this)
+            .setTitle(R.string.dialog_account_title)
+            .setNegativeButton(R.string.dialog_cancel, null)
+            .create()
+
+        // 重建整个列表（勾选/删除之后调用 → 界面立即反映存储的真实状态）
+        fun renderInto() {
+            val current = runCatching { store.list() }.getOrElse { emptyList() }
+            val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            // 弹窗内计数反馈（用户要求：勾选后要有可见反馈）
+            val counter = TextView(this).apply {
+                text = getString(R.string.account_selected_count, current.count { it.enabled })
+                setPadding(12, 8, 12, 8)
+                setTextColor(LINK_BLUE)
+            }
+            column.addView(counter)
+            current.forEach { account -> column.addView(buildAccountRow(store, account) { renderInto() }) }
+            dialog.setView(column)
+        }
+
+        renderInto()
+        dialog.show()
+    }
+
+    /**
+     * 一行：`CheckBox`（勾选） + `账户`（偏左，weight=1） + `网络`（偏右） + `删除`（最右，蓝色）。
+     *
+     * @param afterChange 勾选/删除完成后回调（调用方据此重建列表与计数）
+     */
+    private fun buildAccountRow(store: AccountStore, account: SavedAccount, afterChange: () -> Unit): View {
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            setPadding(8, 8, 8, 8)
+        }
+        // ① 最左侧：勾选框（勾选 = 参与每天早上 6:00 的网络匹配）
+        val checkbox = CheckBox(this).apply {
+            isChecked = account.enabled
+            tag = "rendering"     // 渲染态标记：setChecked 不触发「写存储」那条分支
+        }
+        checkbox.setOnCheckedChangeListener { _, checked ->
+            if (checkbox.tag == "rendering") return@setOnCheckedChangeListener
+            val ok = runCatching { store.setEnabled(account.ssid, checked) }.getOrElse {
+                saveFailed(it)
+                false
+            }
+            if (!ok) checkbox.isChecked = account.enabled
+            afterChange()          // 立即持久化 + 立即刷新计数
+        }
+        row.addView(checkbox)
+
+        // ② 偏左：账户（备注名；**只显示 label，绝不显示账号/密码**）
+        row.addView(TextView(this).apply {
+            text = account.label
+            textSize = 16f
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f)
+        })
+
+        // ③ 偏右：网络（该条绑定的 WiFi）
+        row.addView(TextView(this).apply {
+            text = account.ssid
+            textSize = 14f
+            setPadding(8, 0, 8, 0)
+        })
+
+        // ④ 最右侧：蓝色「删除」（点击 → 确认框；不触发本行勾选切换，见本方法上方的说明）
+        row.addView(TextView(this).apply {
+            text = getString(R.string.account_delete)
+            textSize = 15f
+            setTextColor(LINK_BLUE)
+            setPadding(8, 4, 4, 4)
+            isClickable = true
+            setOnClickListener { confirmDeleteAccount(store, account, afterChange) }
+        })
+        return row
+    }
+
+    /** 删除确认框：文案**逐字**「确认要删除<对应账户名称>和相应的<对应网络名称>吗?」（英文半角问号）。 */
+    private fun confirmDeleteAccount(store: AccountStore, account: SavedAccount, afterChange: () -> Unit) {
+        AlertDialog.Builder(this)
+            .setMessage(getString(R.string.account_delete_confirm, account.label, account.ssid))
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                val deleted = runCatching { store.delete(account.ssid) }.getOrElse {
+                    saveFailed(it)
+                    false
+                }
+                if (!deleted) return@setPositiveButton
+                // 删除后处理「当前选中」的一致性：v2 侧已在 AccountStore.delete 里清掉悬空的
+                // selected_label_v1；这里把 v1 的「当前选中」也清掉，避免它继续指向已删除的记录。
+                runCatching {
+                    val repo = SrunStorage.credentialRepository(this)
+                    val label = repo.selectedLabel()
+                    if (label != null && store.findByName(label) == null) repo.delete(label)
+                }
+                afterChange()      // 刷新弹窗内容（条数与勾选计数同步变化）
+                toast(getString(R.string.save_done, account.label, account.ssid))
             }
             .setNegativeButton(R.string.dialog_cancel, null)
             .show()
@@ -1076,6 +1236,9 @@ class MainActivity : Activity() {
          * 20 与「一屏之内」量级一致，不引入任何新依赖或配置项。
          */
         const val SSID_LIST_MAX_VISIBLE = 20
+
+        /** 弹窗内「删除」「已勾选 N 个」用的蓝色（用户要求「最右侧为蓝色字体删除」）。 */
+        private val LINK_BLUE = 0xFF1976D2.toInt()
 
         /**
          * insets-fix1（A-1）：布局里 `ScrollView` 的左右 padding（与 activity_main.xml 的

@@ -34,6 +34,22 @@ interface CredentialLookup {
     fun selected(): Credential?
 }
 
+/**
+ * 「该 WiFi 是否有**已勾选**的账号」查询端口（accountsel1 任务新增，真机实现：storage.AccountStore）。
+ *
+ * 为什么需要它：只靠 [WifiAccountLookup] 拦不住「未勾选的账号仍被认证」——
+ * AuthFlow 在拿不到绑定 label 时还会用 [CredentialLookup.selected] 兜底（selected_label_v1），
+ * 于是「未勾选」会被兜底路径绕过。有了本端口，AuthFlow 在同一次判定里多做一步：
+ * **未勾选 ⇒ 不发请求**（code = SSID_NOT_BOUND，与「该 WiFi 未绑定账号」同类跳过）。
+ *
+ * 默认实现是 null（构造参数默认值），因此既有调用点与既有离线核对的 class 快照**不受影响**；
+ * 只有真机装配点（MainActivity / AuthWorkWiring）显式传入。
+ */
+interface EnabledAccountLookup {
+    /** 该 SSID 是否存在已勾选的账号；SSID 为空/无绑定/未勾选一律 false。 */
+    fun hasEnabledAccountFor(ssid: String?): Boolean
+}
+
 /** WiFi↔账号绑定查询端口（真机实现：包裹 storage 包的 WifiAccountMap）。 */
 interface WifiAccountLookup {
     /** 该 SSID 绑定的账号 label；未绑定返回 null。 */
@@ -125,6 +141,11 @@ object AuthSkip {
 class AuthFlow(
     private val credentials: CredentialLookup,
     private val wifiMap: WifiAccountLookup,
+    /**
+     * 【accountsel1 任务 C 段】已勾选账号端口（真机传 storage.AccountStore；默认 null = 不做该判定）。
+     * 见 [EnabledAccountLookup] 的 KDoc：它拦住「未勾选却被 selected 兜底认证」这条路径。
+     */
+    private val enabledAccounts: EnabledAccountLookup? = null,
     private val wifiSnapshot: WifiSnapshotPort,
     private val transport: AuthTransport,
     private val portalProvider: PortalProvider = defaultPortalProvider,
@@ -164,6 +185,14 @@ class AuthFlow(
         // 步骤 1：当前 SSID 必须可读（读不到 → 不发请求）
         if (current.isNullOrBlank()) {
             return AuthFlowOutcome.Skipped(AuthSkipReason.NO_CURRENT_SSID, null, targetSsid)
+        }
+
+        // 步骤 2a（accountsel1 任务 C 段）：**未勾选的账号不参与认证**。
+        // 必须在「查绑定关系」之前判：若放到步骤 4 之后，`credentials.selected()` 的兜底会把
+        // 「本 WiFi 绑定的账号被用户取消勾选」这种情况重新认证出去。
+        // enabledAccounts == null 表示调用方未启用该判定（既有离线核对的老调用点），行为与改动前一致。
+        if (enabledAccounts != null && !enabledAccounts.hasEnabledAccountFor(current)) {
+            return AuthFlowOutcome.Skipped(AuthSkipReason.SSID_NOT_BOUND, current, targetSsid)
         }
 
         // 步骤 2：查绑定关系

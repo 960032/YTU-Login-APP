@@ -17,6 +17,7 @@ import top.ytu.srunautologin.net.WifiPermissionState
 import top.ytu.srunautologin.net.WifiScanEntry
 import top.ytu.srunautologin.net.WifiSnapshotCore
 import top.ytu.srunautologin.net.WifiSource
+import top.ytu.srunautologin.storage.AccountStore
 import top.ytu.srunautologin.storage.CredentialRepository
 import top.ytu.srunautologin.storage.KeyValueStore
 import top.ytu.srunautologin.storage.SecureStore
@@ -355,6 +356,14 @@ object SrunStorage {
 
     fun credentialRepository(context: Context): CredentialRepository =
         CredentialRepository(secureStore(context), keyValueStore(context))
+
+    /**
+     * v2 账号列表仓库（accountsel1 任务）：**当前读路径**。
+     * 与 v1 共用同一份 [KeyValueStore] 与 [SecureStore]，因此迁移/镜像写的是同一份数据，
+     * 不会出现「两个仓库各存一份、互相看不见」的问题。
+     */
+    fun accountStore(context: Context): AccountStore =
+        AccountStore(secureStore(context), keyValueStore(context))
 
     fun wifiAccountMap(context: Context): WifiAccountMap = WifiAccountMap(keyValueStore(context))
 }
