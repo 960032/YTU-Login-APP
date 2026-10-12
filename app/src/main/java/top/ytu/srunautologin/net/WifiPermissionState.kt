@@ -27,8 +27,9 @@ data class WifiCapability(
  *
  * 依据：
  *  - Android 8.1（API 27）起，读取 SSID / 获取扫描结果需要 ACCESS_FINE_LOCATION（API 26 不需要）；
- *  - Android 13（API 33）起，读取 SSID / 扫描改用 NEARBY_WIFI_DEVICES；
- *    为兼容仍申请了精确位置的应用，API 33+ 时 FINE_LOCATION 也视为等效授权；
+ *  - Android 13（API 33）起，读取 SSID / 扫描不再只需要 NEARBY_WIFI_DEVICES：
+ *    真机上只申请它会出现「权限显示已授予、却读不到任何 WiFi 信息」，故 wifi-fix1 起
+ *    **两个一起申请**（NEARBY_WIFI_DEVICES + ACCESS_FINE_LOCATION），满足条件仍是「任一被授予即可读」；
  *  - ACCESS_WIFI_STATE / CHANGE_WIFI_STATE 是普通权限（安装即授予，无运行时弹窗），不参与本状态机。
  *
  * 权限名字符串与 android.Manifest.permission 中的常量值逐字相同（本文件不引用 Android API，
@@ -52,18 +53,31 @@ object WifiPermissionPolicy {
     const val MAX_SDK = 36
 
     /** 该 API 等级下，读取 SSID 与扫描列表所需的**运行时**权限；空集表示无需运行时权限。 */
+    /**
+     * 该 API 等级下读取 SSID 与扫描列表所需的**运行时**权限；空集表示无需运行时权限。
+     *
+     * wifi-fix1（真机缺陷 R2）修订：API 33+ **同时申请** [NEARBY_WIFI_DEVICES] 与 [ACCESS_FINE_LOCATION]。
+     * 依据：`WifiManager.getScanResults()` 官方 javadoc 逐字要求
+     * "An app must hold ACCESS_FINE_LOCATION permission and ACCESS_WIFI_STATE permission in order to get valid results."，
+     * 通篇未提 NEARBY_WIFI_DEVICES；真机（Redmi Turbo 4 Pro / HyperOS 3 / Android 16）只申请 NEARBY 时
+     * 出现「权限显示已授予、却读不到任何 WiFi 信息」。两个都申请可覆盖系统的两条判定路径。
+     * 满足条件仍是「任一被授予即可读」（见 [state]），**不收紧**成「都要」。
+     */
     fun requiredPermissions(sdkInt: Int): List<String> = when {
         sdkInt < API_SSID_LOCKDOWN -> emptyList()
         sdkInt < API_NEARBY_WIFI -> listOf(ACCESS_FINE_LOCATION)
-        else -> listOf(NEARBY_WIFI_DEVICES)
+        // API 33+：两个权限都申请（顺序固定，便于离线核对与 UI 按顺序展示）
+        else -> listOf(NEARBY_WIFI_DEVICES, ACCESS_FINE_LOCATION)
     }
 
     /** 由「系统版本 + 已授予权限集合」推导 [WifiPermissionState]。 */
     fun state(sdkInt: Int, grantedPermissions: Set<String>): WifiPermissionState {
         val required = requiredPermissions(sdkInt)
         if (required.isEmpty()) return WifiPermissionState.NOT_REQUIRED
-        val satisfied = required.any { it in grantedPermissions } ||
-            (sdkInt >= API_NEARBY_WIFI && ACCESS_FINE_LOCATION in grantedPermissions)
+        // 「或」语义（wifi-fix1 复核后**保持不收紧**）：任一所需权限被授予即可读。
+        // API 33+ 的所需集合已同时包含 NEARBY_WIFI_DEVICES 与 ACCESS_FINE_LOCATION，原先单独兜底的
+        // `|| FINE_LOCATION in grantedPermissions` 子句因此已冗余（且读起来像「两者都必需」），去掉。
+        val satisfied = required.any { it in grantedPermissions }
         return if (satisfied) WifiPermissionState.GRANTED else WifiPermissionState.DENIED
     }
 
@@ -127,8 +141,9 @@ class DefaultWifiPermissionFlow(
     private var rationaleShown = false
 
     override val explainText: String =
-        "本应用需要「附近设备（WiFi）」权限，用于读取当前连接的 WiFi 名称与可用 WiFi 列表，" +
-            "以便按您设置的 WiFi-账号对应关系自动登录。该信息仅在本机使用，不会上传。"
+        "读取 WiFi 信息需要「位置信息」权限（Android 规定 WiFi 名称与列表属于位置信息）。请授予「精确位置」，" +
+            "以便读取当前连接的 WiFi 名称与可用 WiFi 列表，按您设置的 WiFi-账号对应关系自动登录。" +
+            "该信息仅在本机使用，不会上传。"
 
     override fun requiredPermissions(): List<String> = WifiPermissionPolicy.requiredPermissions(sdkInt)
 

@@ -240,29 +240,51 @@ class ConfigViewModel(
 
     /* ------------------------- 元素 5：WiFi 选择区 ------------------------- */
 
+    /**
+     * WiFi 数据的统一提示（wifi-fix1 / 缺陷 R4、任务 B）。
+     *
+     * 旧实现在「权限已授予但系统读不到」时说「（未连接、WiFi 关闭或权限被拒）」——与状态行的绿色
+     * 「已授权」自相矛盾，并把用户指向错误方向。这里按事实分支：
+     *  - 权限不可扫描 → 沿用既有降级文案；
+     *  - 权限没问题但**一条都读不到** → 明确说「已获得权限，但系统未返回…」并指向「位置信息」总开关；
+     *  - 其余情况 → 沿用既有降级文案（正常时为空串）。
+     */
+    private fun wifiDataNotice(cap: WifiCapability, noDataAtAll: Boolean): String = when {
+        !cap.canScanList -> degradeNotice(cap)
+        noDataAtAll ->
+            "已获得权限，但系统未返回 WiFi 信息：请先确认系统「位置信息」总开关已开启，并确认本应用已开启「精确位置」（Android 12+ 起 WiFi 名称与列表属于位置信息，关闭精确位置会读不到）"
+        else -> degradeNotice(cap)
+    }
+
     /** 刷新系统检测到的 WiFi 列表；权限被拒时列表为空并要求界面显示降级提示。 */
     fun refreshSsidList(): ConfigUiState = update { s ->
         val list = wifi.scanSsidList()
+        val current = wifi.currentSsid()
+        val cap = wifi.capability()
         val selected = s.selectedSsid?.takeIf { list.contains(it) }
         s.copy(
             ssidList = list,
             selectedSsid = selected,
-            currentSsid = wifi.currentSsid(),
-            capability = wifi.capability(),
+            currentSsid = current,
+            capability = cap,
             permissionState = wifi.permissionState(),
-            noticeText = degradeNotice(wifi.capability())
+            noticeText = wifiDataNotice(cap, current == null && list.isEmpty())
         )
     }
 
-    /** 「用当前连接的 WiFi」快捷按钮。 */
+    /** 「使用当前连接 wifi」快捷按钮。 */
     fun useCurrentSsid(): ConfigUiState = update { s ->
         val current = wifi.currentSsid()
+        val cap = wifi.capability()
         s.copy(
             currentSsid = current,
             selectedSsid = current ?: s.selectedSsid,
-            noticeText = if (current == null) "未检测到当前连接的 WiFi（未连接、WiFi 关闭或权限被拒）"
-            else "已选择当前连接的 WiFi：$current",
-            capability = wifi.capability()
+            noticeText = when {
+                current != null -> "已选择当前连接的 WiFi：$current"
+                !cap.canScanList -> "未检测到当前连接的 WiFi：未授予「位置信息」权限，读不到 WiFi 信息（可点上方按钮申请）"
+                else -> wifiDataNotice(cap, true)
+            },
+            capability = cap
         )
     }
 
@@ -302,8 +324,8 @@ class ConfigViewModel(
             it.copy(
                 permissionState = newState,
                 capability = cap,
-                noticeText = if (granted) "已获得 WiFi 权限：可显示系统检测到的 WiFi 列表"
-                else "已拒绝 WiFi 权限：降级为「只检测当前 WiFi」，不显示周边列表 ${cap.degradedReason ?: ""}".trim(),
+                noticeText = if (granted) "已获得「位置信息」权限：可显示系统检测到的 WiFi 列表"
+                else "已拒绝「位置信息」权限：降级为「只检测当前 WiFi」，不显示周边列表 ${cap.degradedReason ?: ""}".trim(),
                 ssidList = if (granted) it.ssidList else emptyList()
             )
         }

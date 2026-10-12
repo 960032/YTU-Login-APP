@@ -1,6 +1,7 @@
 package top.ytu.srunautologin.storage
 
 import java.security.GeneralSecurityException
+import java.security.ProviderException
 import java.security.SecureRandom
 import java.util.Base64
 import javax.crypto.Cipher
@@ -59,12 +60,25 @@ class SecureStore(private val keyProvider: SecretKeyProvider) {
 
     private val random = SecureRandom()
 
-    /** 加密：每次调用都生成新的随机 IV，因此同一明文两次加密的密文必然不同。 */
+    /**
+     * 加密：每次调用都生成**新的随机 IV**（SecureRandom），因此同一明文两次加密的密文必然不同。
+     * 失败一律收敛为 [SecureStoreException]（保留 cause），与 decrypt() 口径一致——底层可能是
+     * GeneralSecurityException，也可能是 Keystore 抛出的 ProviderException。
+     */
     fun encrypt(plain: ByteArray): ByteArray {
-        val iv = ByteArray(IV_LENGTH).also { random.nextBytes(it) }
-        val cipher = Cipher.getInstance(TRANSFORMATION)
-        cipher.init(Cipher.ENCRYPT_MODE, keyProvider.getOrCreate(), GCMParameterSpec(TAG_BITS, iv))
-        val cipherText = cipher.doFinal(plain)
+        val iv = ByteArray(IV_LENGTH).also { random.nextBytes(it) }   // 每次全新随机 IV，绝不复用（GCM 前提）
+        val cipherText = try {
+            val cipher = Cipher.getInstance(TRANSFORMATION)
+            cipher.init(Cipher.ENCRYPT_MODE, keyProvider.getOrCreate(), GCMParameterSpec(TAG_BITS, iv))
+            cipher.doFinal(plain)
+        } catch (e: GeneralSecurityException) {
+            // 与 decrypt() 同口径：收敛成 SecureStoreException 并保留 cause，调用方才有机会显示可见错误。
+            throw SecureStoreException("加密失败：Keystore/算法不可用（${e.javaClass.simpleName}: ${e.message}）", e)
+        } catch (e: ProviderException) {
+            // Keystore 也可能抛 ProviderException（RuntimeException 子类，不是 GeneralSecurityException 子类）：
+            // 例如硬件密钥不可用、密钥被系统失效。同样收敛并保留 cause。
+            throw SecureStoreException("加密失败：Keystore 提供者异常（${e.javaClass.simpleName}: ${e.message}）", e)
+        }
 
         val out = ByteArray(HEADER_LENGTH + IV_LENGTH + cipherText.size)
         out[0] = MAGIC

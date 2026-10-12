@@ -30,6 +30,12 @@ class CredentialRepository(
         val plain = try {
             secureStore.decryptFromBase64String(blob)
         } catch (e: SecureStoreException) {
+            // 加密层不可用（密钥被删除/失效、密文被篡改）时**降级为「无凭据」而不是抛出**：本方法在 UI 渲染与
+            // 登录判定的同步栈上被调用，抛出去就是闪退。这里同时留下可复查的日志痕迹，避免「静默消失」。
+            // 只改读取侧的降级，不动写入侧契约——写失败仍由 save()/upsert() 抛给调用方（UI 捕获并显示可见错误）。
+            java.util.logging.Logger.getLogger("SrunAutoLogin").warning(
+                "凭据读取失败，降级为「无凭据」：" + e.javaClass.simpleName + ": " + e.message
+            )
             return emptyList()
         }
         if (plain.isEmpty()) return emptyList()
@@ -52,7 +58,12 @@ class CredentialRepository(
 
     fun find(label: String): Credential? = list().firstOrNull { it.label == label }
 
-    /** 新增或按 label 覆盖；返回 true 表示新增，false 表示覆盖已有。 */
+    /**
+     * 新增或按 label 覆盖；返回 true 表示新增，false 表示覆盖已有。
+     *
+     * 异常契约（行为未改动，仅明确写出）：加密不可用时 [SecureStore.encryptToBase64String] 抛
+     * [SecureStoreException] 并**原样透传**给调用方，由 UI 捕获后显示可见错误（保存失败不再闪退）。
+     */
     fun upsert(credential: Credential): Boolean {
         val all = list().toMutableList()
         val idx = all.indexOfFirst { it.label == credential.label }

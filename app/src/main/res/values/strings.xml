@@ -23,26 +23,28 @@
 
     <!-- 元素 5：WiFi 选择 -->
     <string name="label_wifi">WiFi 选择</string>
-    <string name="btn_use_current_wifi">用当前连接的 WiFi</string>
+    <string name="btn_use_current_wifi">使用当前连接 wifi</string>
     <string name="hint_new_ssid">或手动输入 WiFi 名称</string>
     <!-- WiFi 列表长度上限（insets-fix1 / B：周边 WiFi 可能上百个，全部渲染会把下方控件推得极远） -->
     <string name="ssid_list_more">还有 %1$d 个未显示</string>
 
     <!-- 元素 6：权限说明与申请 -->
-    <string name="btn_request_permission">申请 WiFi 权限</string>
+    <string name="btn_request_permission">申请「位置信息」权限</string>
     <string name="permission_explain_title">权限用途说明</string>
     <string name="permission_grant_ok">同意并申请</string>
     <string name="permission_grant_cancel">暂不申请（只检测当前 WiFi）</string>
-    <string name="permission_not_shown">尚未申请 WiFi 权限：列表可能为空，可点下方按钮先查看权限用途说明</string>
+    <string name="permission_not_shown">尚未申请「位置信息」权限：列表可能为空，可点下方按钮先查看权限用途说明</string>
     <string name="degraded_prefix">当前处于降级状态</string>
-    <string name="degraded_no_list">权限被拒：仅检测当前连接的 WiFi，不显示周边列表</string>
+    <string name="degraded_no_list">「位置信息」权限被拒：仅检测当前连接的 WiFi，不显示周边列表</string>
+    <!-- wifi-fix1（B）：权限已授予但系统读不到 WiFi 信息时，列表区的显式提示（指向系统「位置信息」总开关） -->
+    <string name="ssid_list_empty_no_data">已获得权限，但系统未返回 WiFi 信息：请先确认系统「位置信息」总开关已开启，并确认本应用已开启「精确位置」（关闭精确位置会读不到 WiFi 名称与列表）</string>
 
     <!-- 元素 6 的状态行（与说明分开显示，颜色由代码按状态设置） -->
     <string name="permission_state_unknown">WiFi 权限：尚未申请</string>
-    <string name="permission_state_granted">WiFi 权限：已授权（可显示系统检测到的 WiFi 列表）</string>
-    <string name="permission_state_denied">WiFi 权限：未授权（仅检测当前连接的 WiFi）</string>
+    <string name="permission_state_granted">WiFi 权限：已授权</string>
+    <string name="permission_state_denied">WiFi 权限：未授权（需「位置信息」权限）</string>
     <string name="permission_state_degraded_suffix">（降级中）</string>
-    <string name="permission_notice_common">该权限用于读取 WiFi 名称，以便自动登录到校园网；不同意时仍可登录已连接的 WiFi。</string>
+    <string name="permission_notice_common">该「位置信息」权限用于读取 WiFi 名称（Android 规定 WiFi 名称属于位置信息），以便自动登录到校园网；不同意时仍可登录已连接的 WiFi。</string>
 
     <!-- 元素 7：保存 -->
     <string name="btn_save">保存账号与 WiFi 绑定</string>

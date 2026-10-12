@@ -30,7 +30,7 @@ object UiSpec {
         UiElement(2, "密码输入", "EditText", "edit_password", "B2（inputType=textPassword）"),
         UiElement(3, "登录方式二选一", "Spinner", "spinner_carrier", "B2（烟台大学/中国移动）"),
         UiElement(4, "备注名", "EditText", "edit_label", "B2"),
-        UiElement(5, "WiFi 选择区（系统列表 + 用当前连接的 WiFi）", "LinearLayout+Button", "ssid_list/btn_use_current_wifi", "B2"),
+        UiElement(5, "WiFi 选择区（系统列表 + 使用当前连接 wifi）", "LinearLayout+Button", "ssid_list/btn_use_current_wifi", "B2"),
         UiElement(6, "权限说明与申请", "TextView+Button", "text_permission_notice/btn_request_permission", "权限策略"),
         // 用户真机反馈（ui-fix1）：权限「说明」与「状态」原来挤在同一个 TextView 里，分辨不出。
         // 这里如实登记新增的独立状态行；index 用 6a 表示「元素 6 的拆分」，**不重排既有 7..10 的编号**，

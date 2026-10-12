@@ -33,6 +33,7 @@ import top.ytu.srunautologin.net.WifiSnapshotCore
 import top.ytu.srunautologin.platform.AndroidWifiPermissionFlow
 import top.ytu.srunautologin.platform.AndroidWifiSource
 import top.ytu.srunautologin.platform.SrunStorage
+import top.ytu.srunautologin.storage.SecureStoreException
 import java.io.File
 
 /**
@@ -465,10 +466,22 @@ class MainActivity : Activity() {
             when (val outcome = viewModel.save()) {
                 is SaveOutcome.Invalid -> toast(outcome.message)
                 is SaveOutcome.Saved -> {
-                    SrunStorage.credentialRepository(this).upsert(outcome.plan.credential)
-                    SrunStorage.wifiAccountMap(this).bind(outcome.plan.targetSsid, outcome.plan.label)
-                    SrunStorage.credentialRepository(this).select(outcome.plan.label)
-                    toast(getString(R.string.save_done, outcome.plan.label, outcome.plan.targetSsid))
+                    // 先清掉上一次的失败标记：本次成功就显示成功，不被旧错误遮住。
+                    savePersistError = null
+                    // 加密存储在真机上可能拒绝加密（Keystore 抛 InvalidAlgorithmParameterException 等）：
+                    // SecureStore 已把底层异常收敛成 SecureStoreException，这里必须本地兜住——否则异常沿
+                    // onClick 冒到主线程，就是本次真机闪退。写失败一律走 saveFailed（状态区 + 日志 + 提示）。
+                    val stored = runCatching { SrunStorage.credentialRepository(this).upsert(outcome.plan.credential) }
+                    if (stored.isFailure) {
+                        saveFailed(stored.exceptionOrNull()!!)
+                    } else {
+                        val bound = runCatching {
+                            SrunStorage.wifiAccountMap(this).bind(outcome.plan.targetSsid, outcome.plan.label)
+                            SrunStorage.credentialRepository(this).select(outcome.plan.label)
+                        }
+                        if (bound.isFailure) saveFailed(bound.exceptionOrNull()!!)
+                        else toast(getString(R.string.save_done, outcome.plan.label, outcome.plan.targetSsid))
+                    }
                 }
             }
             render()
@@ -565,8 +578,17 @@ class MainActivity : Activity() {
 
     /** 元素 8：状态区渲染（失败不静默：文本 + 颜色 + Toast）。 */
     private fun render() {
+        // 状态快照：render() 全文以 s 引用（compilefix5 修复：该行此前被误删，导致 Unresolved reference s）。
         val s = viewModel.state
-        textStatus.text = s.statusText
+        // 保存失败优先显示：状态区不能只说「尚未登录」，否则用户分不清「没保存成功」和「没点过保存」。
+        val persistError = savePersistError
+        if (persistError != null) {
+            textStatus.text = persistError
+            applyStateColor(textStatus, COLOR_STATUS_FAIL)
+        } else {
+            textStatus.text = s.statusText
+            applyStateColor(textStatus, if (s.statusOk) COLOR_STATUS_OK else COLOR_STATUS_FAIL)
+        }
         applyStateColor(textStatus, if (s.statusOk) COLOR_STATUS_OK else COLOR_STATUS_FAIL)
         if (s.lastResult != null && !s.statusOk) {
             Toast.makeText(this, s.statusText, Toast.LENGTH_LONG).show()
@@ -609,6 +631,14 @@ class MainActivity : Activity() {
             val tv = TextView(this)
             tv.text = getString(R.string.degraded_no_list)
             ssidList.addView(tv)
+        } else if (s.ssidList.isEmpty() && s.capability.canScanList && s.currentSsid == null) {
+            // wifi-fix1（B）：权限已授予、却一条 WiFi 都读不到时，列表区**不能沉默**——旧实现只在
+            // degraded（权限被拒）时提示，于是真机上只剩绿色的「已授权」状态行，用户看不出问题在
+            // 系统「位置信息」总开关。此处补显式提示（琥珀色，与绿色「已授权」不矛盾）。
+            val tv = TextView(this)
+            tv.text = getString(R.string.ssid_list_empty_no_data)
+            tv.setTextColor(0xFFF57F17.toInt())
+            ssidList.addView(tv)
         }
     }
 
@@ -640,6 +670,30 @@ class MainActivity : Activity() {
         render()
         // 系统弹窗刚关闭，用户最需要看到的就是「到底给没给」→ 滚到权限状态行
         scrollTo(textPermissionState)
+    }
+
+    /**
+     * 保存失败的可见错误（null = 无失败）。ViewModel 不持有加密层错误，故由 Activity 记录。
+     * 硬约束（crashfix2）：初始化器不得触碰 Context——这里只是可空 String 字段，初始化为 null，不碰 Context。
+     */
+    private var savePersistError: String? = null
+
+    /**
+     * 保存链路的统一失败出口：落状态区（render 读取）＋弹提示＋记日志。
+     * SecureStoreException（加密存储不可用）与 RuntimeException（其他存储异常）都在此收住，不再冒到主线程。
+     */
+    private fun saveFailed(e: Throwable) {
+        val reason = when {
+            e is SecureStoreException -> e.message ?: "加密存储不可用（Keystore 拒绝）"
+            e is RuntimeException -> e.message ?: e.javaClass.simpleName
+            else -> e.javaClass.simpleName + ": " + e.message
+        }
+        // 文案用拼接而非新增字符串资源：本任务写权限不含 res/（strings.xml 只读），且 getString 引用不存在的
+        // R.string 会在编译期就失败。保留「保存失败：」前缀，便于用户与日志对照。
+        val text = "保存失败：" + reason
+        Log.e("SrunAutoLogin", "保存失败：" + reason, e)
+        savePersistError = text
+        toast(text)
     }
 
     private fun toast(message: String) {
