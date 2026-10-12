@@ -9,6 +9,66 @@ import java.security.MessageDigest
  * 输入为项目根目录（artifacts/android-app）——只读文本，不修改任何文件。
  * 只有当目录不存在时对应核对项才判为不可用（会明确写出原因，不静默通过）。
  */
+
+/**
+ * assertion-fix2/A：**稳健定位 android-app 项目根目录**（不再把「项目根」当固定相对路径）。
+ *
+ * 背景：本工作区路径含中文（`...\YTU校园网\...`）。③ 套核对入口 `ClientCheckMain.kt:14`
+ * 用的是 `File(".")` 这类相对路径，只有「当前工作目录恰好是 artifacts/android-app」时才成立。
+ * 本函数把「定位」这一步显式化，且**不做任何转义/编码假设**：
+ * 全程只用 `java.io.File` 的原生 Unicode 路径（Java 内部走 Windows 宽字符 API），
+ * 不拼码点、不做 percent-encoding、不依赖控制台代码页。
+ *
+ * 解析顺序：
+ *  ① 显式传入的根（若其自带 `settings.gradle.kts` + `app/src/main/AndroidManifest.xml` 两个标记）；
+ *  ② 从当前工作目录**逐级向上**查找带上述标记的目录；
+ *  ③ 从当前工作目录向上最多 5 层，逐层探测 `artifacts/android-app`、`android-app`
+ *     （覆盖「工作目录是工作区根」与「工作目录是 artifacts/ 下某个子目录」两种情况）；
+ *  ④ 宽松兜底：只要含 `app/src/main/AndroidManifest.xml` 就接受。
+ *
+ * 都找不到 → 返回 null（由调用方**明确报错**，不静默通过）。
+ */
+fun resolveAndroidAppRoot(explicit: File? = null): File? {
+    val marker = "app/src/main/AndroidManifest.xml"
+
+    fun looksLikeRoot(d: File?): Boolean =
+        d != null && d.isDirectory && File(d, "settings.gradle.kts").isFile && File(d, marker).isFile
+
+    fun looksLikeRootLoose(d: File?): Boolean =
+        d != null && d.isDirectory && File(d, marker).isFile
+
+    // ① 显式传入且带完整标记
+    if (looksLikeRoot(explicit)) return explicit!!.absoluteFile
+
+    // ② 从当前工作目录逐级向上
+    var up: File? = File("").absoluteFile
+    while (up != null) {
+        if (looksLikeRoot(up)) return up
+        up = up.parentFile
+    }
+
+    // ③ 已知相对位置（含「工作区根 → artifacts/android-app」）
+    var base: File? = File("").absoluteFile
+    var level = 0
+    while (base != null && level <= 5) {
+        for (cand in listOf("artifacts/android-app", "android-app")) {
+            val c = File(base, cand)
+            if (looksLikeRoot(c)) return c.absoluteFile
+        }
+        base = base.parentFile
+        level++
+    }
+
+    // ④ 宽松兜底
+    if (looksLikeRootLoose(explicit)) return explicit!!.absoluteFile
+    var loose: File? = File("").absoluteFile
+    while (loose != null) {
+        if (looksLikeRootLoose(loose)) return loose
+        loose = loose.parentFile
+    }
+    return null
+}
+
 object SourceChecks {
 
     /** auth 包源码中不应出现的「自写密码学」痕迹。 */
@@ -17,12 +77,18 @@ object SourceChecks {
     )
 
     /**
-     * SRC-4 权限白名单：允许出现在 AndroidManifest 里的 `uses-permission`，恰好这 7 条（顺序不限）。
+     * SRC-4 权限白名单：允许出现在 AndroidManifest 里的 `uses-permission`（顺序不限）。
      *
-     * 修订说明（第 ③ 套核对 57 项中唯一失败项的修正）：原断言写于 T15，当时 manifest 权限确实只有
-     * INTERNET + ACCESS_NETWORK_STATE；T16 为满足基准卡 B4「开机后无需人工操作自动认证」正确新增了
-     * RECEIVE_BOOT_COMPLETED，于是原「写死两条」的断言过时，产生误报。本口径改为
-     * 「白名单（⊆，挡住悄悄扩权）+ 黑名单（∩ = ∅，守住 N4/B9 最小权限红线）」双重检查。
+     * 修订记录（**只更新已被需求变更推翻的口径，其余一条不动**）：
+     *  - T15：写死 2 条（INTERNET + ACCESS_NETWORK_STATE）。
+     *  - T16：新增 RECEIVE_BOOT_COMPLETED（B4 开机自启）→ 原断言过时，本口径改为
+     *    「白名单（⊆，挡住悄悄扩权）+ 黑名单（∩ = ∅，守住 N4/B9 最小权限红线）」双重检查。
+     *  - assertion-fix2（需求变更：每日 6:00 精确唤醒 + 待机常驻通知）：
+     *    该功能**必须**声明 POST_NOTIFICATIONS（API 33+ 才能显示通知）、
+     *    FOREGROUND_SERVICE + FOREGROUND_SERVICE_DATA_SYNC（API 34+ 前台服务「类型 ↔ 类型权限」强制配对）、
+     *    SCHEDULE_EXACT_ALARM（精确闹钟）。旧白名单 7 条因此再次过时 → 扩为 11 条；
+     *    并把 POST_NOTIFICATIONS / FOREGROUND_SERVICE 从黑名单移除（它们是本需求的**必要**权限，
+     *    不再是「危险权限」）。**真正危险的权限仍在黑名单里，一条未动**（见下）。
      */
     private val ALLOWED_PERMISSIONS = listOf(
         "android.permission.INTERNET",
@@ -31,15 +97,23 @@ object SourceChecks {
         "android.permission.CHANGE_WIFI_STATE",
         "android.permission.ACCESS_FINE_LOCATION",
         "android.permission.NEARBY_WIFI_DEVICES",
-        "android.permission.RECEIVE_BOOT_COMPLETED"
+        "android.permission.RECEIVE_BOOT_COMPLETED",
+        // ↓ assertion-fix2 新增：morning1「每日 6:00 精确唤醒 + 待机常驻通知」的四条必需权限
+        "android.permission.POST_NOTIFICATIONS",
+        "android.permission.FOREGROUND_SERVICE",
+        "android.permission.FOREGROUND_SERVICE_DATA_SYNC",
+        "android.permission.SCHEDULE_EXACT_ALARM"
     )
 
     /**
      * SRC-4 权限黑名单：一旦出现即判 FAIL（无障碍服务、悬浮窗、全量包查询、
-     * 通话记录/短信/通讯录、通知、前台服务、外部存储）。
+     * 通话记录/短信/通讯录、外部存储）。
      *
      * 这是护栏本体，**不得删除**——即使白名单已经把它挡住，仍要独立断言一次，
      * 保证有人误删白名单条目时红线检查依然生效（两层互为保险）。
+     *
+     * assertion-fix2 变更：**仅移出** POST_NOTIFICATIONS 与 FOREGROUND_SERVICE
+     * （它们是新需求的必要权限，不能既在白名单又在黑名单）；其余 **8 条一条未动**。
      */
     private val FORBIDDEN_PERMISSIONS = listOf(
         "android.permission.BIND_ACCESSIBILITY_SERVICE",
@@ -48,8 +122,6 @@ object SourceChecks {
         "android.permission.READ_CALL_LOG",
         "android.permission.READ_SMS",
         "android.permission.READ_CONTACTS",
-        "android.permission.POST_NOTIFICATIONS",
-        "android.permission.FOREGROUND_SERVICE",
         "android.permission.WRITE_EXTERNAL_STORAGE",
         "android.permission.READ_EXTERNAL_STORAGE"
     )
@@ -99,7 +171,27 @@ object SourceChecks {
     private fun sha256Hex(bytes: ByteArray): String =
         MessageDigest.getInstance("SHA-256").digest(bytes).joinToString("") { "%02x".format(it) }
 
-    fun run(r: CheckRunner, appRoot: File) {
+    fun run(r: CheckRunner, appRootArg: File) {
+        // assertion-fix2/A：先把「项目根」稳健解析出来。
+        // 入口（ClientCheckMain.kt:14）可能只传了 `File(".")`；这里不再假设它就是项目根。
+        val appRoot = resolveAndroidAppRoot(appRootArg)
+        if (appRoot == null) {
+            r.check("SRC-0 定位 android-app 项目根目录（稳健解析，assertion-fix2/A）") {
+                r.require(
+                    false,
+                    "无法定位 android-app 项目根目录：调用方传入 ${appRootArg.absolutePath}；" +
+                        "已尝试「逐级向上查找含 settings.gradle.kts + app/src/main/AndroidManifest.xml 的目录」" +
+                        "与「向上 5 层探测 artifacts/android-app」（全程只走 java.io.File 原生 Unicode 路径，无转义假设）"
+                )
+                "【不可达：上面 require 已抛断言异常】"
+            }
+            return
+        }
+        r.check("SRC-0 定位 android-app 项目根目录（稳健解析，assertion-fix2/A）") {
+            "解析结果=${appRoot.absolutePath}（调用方传入 ${appRootArg.absolutePath}）；" +
+                "判据：该目录同时含 settings.gradle.kts 与 app/src/main/AndroidManifest.xml"
+        }
+
         val authDir = File(appRoot, "app/src/main/java/top/ytu/srunautologin/auth")
         val uiDir = File(appRoot, "app/src/main/java/top/ytu/srunautologin/ui")
         val manifest = File(appRoot, "app/src/main/AndroidManifest.xml")
@@ -177,7 +269,7 @@ object SourceChecks {
                 "文件原始字节=${cryptoFile.readBytes().size}（行尾符不影响判定）；" +
                 "基线原始SHA256=${baselineRawHex.take(16)}…"
         }
-        r.check("SRC-4 AndroidManifest 权限：实际集合 ⊆ 白名单（7 条）且 ∩ 黑名单 = ∅（N4/B9 最小权限）") {
+        r.check("SRC-4 AndroidManifest 权限：实际集合 ⊆ 白名单，且 ∩ 黑名单 = ∅（N4/B9 最小权限）") {
             r.require(manifest.isFile, "缺少 AndroidManifest.xml")
             val text = manifest.readText()
             // 注释用于「权限台账」说明（本次修订教训：旧版对注释做 contains 检查会误判），先剥注释只检查真正生效的 XML。
@@ -212,7 +304,8 @@ object SourceChecks {
             val badComponentPerms = (componentPerms - setOf("android.permission.BIND_JOB_SERVICE")).sorted()
             r.require(badComponentPerms.isEmpty(), "组件上出现白名单之外的 android:permission 属性：$badComponentPerms")
 
-            "实际权限 ${actual.size} 条（按出现顺序）：${permissions.joinToString()}；白名单外 0 条；黑名单命中 0 条；" +
+            "白名单 ${ALLOWED_PERMISSIONS.size} 条 / 黑名单 ${FORBIDDEN_PERMISSIONS.size} 条；" +
+                "实际权限 ${actual.size} 条（按出现顺序）：${permissions.joinToString()}；白名单外 0 条；黑名单命中 0 条；" +
                 "组件级 android:permission=${componentPerms.joinToString().ifEmpty { "（无）" }}"
         }
         r.check("SRC-5 AndroidManifest：MainActivity 已注册、exported=true、LAUNCHER") {

@@ -211,8 +211,11 @@ object ClientChecks {
         r.check("B10-4 auth 包不实现任何摘要算法（无 MessageDigest/Mac/Base64 痕迹）") {
             // 只检查**代码行**（跳过注释与 KDoc），避免把「提到了 SrunCrypto.infoField 用 xEncode」的注释误判为自写实现。
             val forbidden = listOf("MessageDigest", "Mac.getInstance", "SecretKeySpec", "xEncode")
-            val authDir = appRoot?.let { File(it, "app/src/main/java/top/ytu/srunautologin/auth") }
-                ?: File("app/src/main/java/top/ytu/srunautologin/auth")
+            // assertion-fix2/A：不再假设「调用方传来的根就是项目根」（入口 ClientCheckMain.kt:14 传的是 `File(".")`）。
+            // 改用 SourceChecks 里的稳健解析（逐级向上找 settings.gradle.kts + AndroidManifest.xml），
+            // 全程只走 java.io.File 原生 Unicode 路径 —— 本工作区路径含中文「校园网」，不做任何转义/编码假设。
+            val root = resolveAndroidAppRoot(appRoot) ?: appRoot ?: File(".")
+            val authDir = File(root, "app/src/main/java/top/ytu/srunautologin/auth")
             val files = authDir.listFiles { f -> f.isFile && f.name.endsWith(".kt") }?.toList() ?: emptyList()
             r.require(files.isNotEmpty(), "未找到 auth 包源文件：${authDir.absolutePath}")
             val found = ArrayList<String>()
