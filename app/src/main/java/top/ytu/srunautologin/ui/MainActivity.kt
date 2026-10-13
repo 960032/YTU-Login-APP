@@ -669,8 +669,12 @@ class MainActivity : Activity() {
      * logfix1/acctfix1 的旧做法是「**每次刷新都 dismiss 旧的 + show 一个新的**」（为绕开
      * `AlertDialog.setView()` 在已显示之后不触发重新测量/布局的问题），代价是**每次刷新都把滚动位置归零**。
      * 现在改成「**弹窗只构建一次，刷新只改 TextView 的 text**」：`TextView.setText` 自身会
-     * requestLayout/invalidate，由 ViewRootImpl 在下一次 traversal 重新测量，不需要重建窗口；
-     * 刷新前后保持滚动位置（必要时下一帧恢复）。
+     * requestLayout/invalidate，由 ViewRootImpl 在下一次 traversal 重新测量，不需要重建窗口。
+     *
+     * 【probefix1 任务 D 段】滚动策略见 render() 的 KDoc：**默认贴底显示最新；用户上滑看历史则保持原位**。
+     * 真机症状「查看日志时自动翻页到最上端」来自旧实现的 `sv.scrollY = keepScroll`（属性赋值，
+     * 且内容替换后视图位置会被重置）配合 `keepScroll > 0` 守卫（用户本来就停在顶部时反而不恢复，
+     * 文本变长后视图停在顶部）。
      *
      * 用户要求的「打开时会实时同步记录日志」的两个含义都满足：
      *  - **理解 1（每次打开读最新）**：`render()` 在 `show()` **之前**先读一次存储并画好，
@@ -699,25 +703,64 @@ class MainActivity : Activity() {
             var bodyTv: TextView? = null
             var scrollArea: ScrollView? = null
 
+            // 【probefix1 任务 D 段】「弹窗还开着吗」的可读闭包：render() 定义在 dialog 之前、
+            // 引用不到它，所以先占位，dialog 建好后立刻替换成真正的 isShowing 查询。
+            // 用途：**文本更新后的滚动只在弹窗仍显示时执行**（弹窗已关就不要再滚）。
+            var dialogShowing: () -> Boolean = { true }
+
             // **每次**刷新都重新读一次存储（AppLog.list 内部有「原文未变则复用解析结果」的缓存，
             // 有新日志就会重新解析，因此这里总是最新数据）。
             fun currentLines(): List<String> =
                 runCatching { AppLog.list(portalStore) }.getOrDefault(emptyList())
 
-            /** 把最新日志画进当前弹窗（**原地更新文本**；返回全量条数）。 */
+            /** 可滚动上限（内容高度 − 视口高度，至少 0）。 */
+            fun maxScrollY(sv: ScrollView): Int {
+                val content = sv.getChildAt(0)?.height ?: 0
+                return (content - sv.height).coerceAtLeast(0)
+            }
+
+            /** 视口是否停在（接近）底部（容差 slackPx）。 */
+            fun isNearBottom(sv: ScrollView, slackPx: Int): Boolean =
+                sv.scrollY >= maxScrollY(sv) - slackPx
+
+            /** 【probefix1 任务 D 段】贴底容差：24dp 以内算「用户在看最新」。 */
+            val stickSlackPx = (24 * resources.displayMetrics.density).toInt()
+
+            /**
+             * 把最新日志画进当前弹窗（**原地更新文本**；返回全量条数）。
+             *
+             * 【probefix1 任务 D 段·滚动策略】「**默认贴底显示最新；用户上滑看历史则保持原位**」：
+             *  - 更新**前**若视口已贴近底部（用户在看最新）→ 更新后滚到**新的**最大位置（显示最新一行）；
+             *  - 更新**前**若用户已明显向上翻（落后超过 stickSlackPx）→ **保持原位**，
+             *    既不把他拽回底部，也不把他弹到顶部；
+             *  - 用 `sv.scrollTo(0, target)`（真正的滚动调用），**不是** `sv.scrollY = target` 属性赋值；
+             *  - 目标位置在 `post`（下一帧）里**重新读一次** scrollY / max 再算，不用更新前捕获的旧值；
+             *  - `post` 里先查 `dialogShowing()`：弹窗已关 → 不滚。
+             *
+             * 为什么不是「总是滚到底部」：用户正向上翻看历史时每秒被拽回底部，与本次要修的
+             * 「被自动翻到最上端」是同一类打扰（都在抢用户的位置）。为什么默认贴底：
+             * 用户最关心的永远是最新一条日志。
+             */
             fun render(): List<String> {
                 val all = currentLines()
                 val shown = if (all.size > LOG_RENDER_LIMIT) all.subList(all.size - LOG_RENDER_LIMIT, all.size) else all
-                val keepScroll = scrollArea?.scrollY ?: 0
+                val sv = scrollArea
+                // 只用「更新前」的位置判断用户意图（是否在看最新）；具体滚动位置留到 post 里按新值算。
+                val stayAtBottom = sv == null || isNearBottom(sv, stickSlackPx)
                 headerTv?.text = if (all.size > LOG_RENDER_LIMIT) {
                     getString(R.string.log_showing_recent, shown.size, all.size)
                 } else {
                     getString(R.string.log_count, all.size)
                 }
                 bodyTv?.text = if (shown.isEmpty()) getString(R.string.log_empty) else shown.joinToString("\n")
-                // 文本变长/变短后滚动位置可能被夹回 0：下一帧恢复，用户阅读位置不跳。
-                val sv = scrollArea
-                if (sv != null && keepScroll > 0) sv.post { sv.scrollY = keepScroll }
+                if (sv != null) {
+                    sv.post {
+                        if (!dialogShowing()) return@post
+                        val max = maxScrollY(sv)
+                        val target = if (stayAtBottom) max else sv.scrollY.coerceIn(0, max)
+                        sv.scrollTo(0, target)
+                    }
+                }
                 return all
             }
 
@@ -755,6 +798,8 @@ class MainActivity : Activity() {
                 .setNeutralButton(R.string.log_clear) { _, _ -> confirmClearLogs { render() } }
                 .setNegativeButton(R.string.dialog_cancel, null)
                 .create()
+            // 【probefix1 任务 D 段】弹窗已建好 → 把「还开着吗」接到真正的 isShowing 上。
+            dialogShowing = { dialog.isShowing }
 
             // 【理解 2 + 自查 E5】开窗期间定时重读并原地刷新。
             // 用 `View.postDelayed`（View 自带的主线程 Handler，等价 `Handler(Looper.getMainLooper())`，

@@ -23,8 +23,12 @@ import top.ytu.srunautologin.storage.WifiAccountMap
  *   ③ 检查网络是否已登录（**与 ② 同一次探测**，不多打 Portal）→ 已登录：跳过（记日志「已在线」）；
  *   ④ 未登录 → 取凭据 → 调认证客户端执行登录。
  *
- * ② ③ 不确定（超时/无响应/无 error 字段）时 → 返回 [AuthSkipReason.PROBE_UNCERTAIN]（零认证请求），
- * 由 [ProbeRetryPolicy] 的「5 分钟、最多 2 次重试」通道接管（见 artifacts/logfix1/fix-report.md 状态机）。
+ * 【probefix1 任务 B 段·口径变更】②③ **不确定**（超时/无响应/无 error 字段）时 **不再跳过**，
+ * 而是**降级为继续第 ④ 段认证**：探测只是优化（避免不必要的认证请求），探测本身不可靠时
+ * 不应该阻止真正的登录。若网络其实已在线，服务端回的「已在线」文案会被第 ④ 段的
+ * [AuthSkipReason.ALREADY_ONLINE] 兜住（判定见 [SrunProbeClassifier.isAlreadyOnline]）。
+ * [AuthSkipReason.PROBE_UNCERTAIN] 与 [ProbeRetryPolicy] 的「5 分钟、最多 2 次」通道因此
+ * **不再被本类触发**（保留枚举/策略常量是为了不改动 flow 之外的文件）。
  *
  * 【B8 判据（未改）】只有当**当前 SSID 与已绑定的目标 SSID 匹配**时才发起认证；
  * 不匹配时**不发任何请求**（零次 transport 调用），返回 [AuthSkipReason] 描述的 Skipped 结果。
@@ -106,6 +110,12 @@ enum class AuthSkipReason(val code: String) {
     /**
      * 【第 ③ 段】探测结论：**已登录**（服务端返回「已在线」类业务码）→ 跳过登录。
      * 用户原话：「检查网络是否已登录，若未登录则执行自动登录」。
+     *
+     * 【probefix1 任务 A 段·第二来源】认证请求发出后，若 `srun_portal` 的失败响应本身就是
+     * 「已在线」（用户逐字指示：「"You are already online"即代表当前网络已经在线,无需登录」；
+     * 真机实测 `code=E2620`、`msg=E2620: You are already online.`），也归到本枚举 →
+     * **视同成功/跳过**：不重试、不消耗退避预算（`E_SKIP_` 前缀 = 零请求跳过口径，
+     * 见 `work.RetryPolicy.SKIP_CODE_PREFIX`）。
      */
     ALREADY_ONLINE("E_SKIP_ALREADY_ONLINE"),
 
@@ -118,9 +128,16 @@ enum class AuthSkipReason(val code: String) {
     PROBE_UNCERTAIN("E_SKIP_PROBE_UNCERTAIN")
 }
 
-/** AuthFlow 的最终结果：Skipped（零请求）或 Done（真的调用过认证客户端）。 */
+/** AuthFlow 的最终结果：Skipped 或 Done（真的调用过认证客户端）。 */
 sealed interface AuthFlowOutcome {
-    /** 已按 [AuthSkipReason] 跳过，未发出任何认证请求。 */
+    /**
+     * 已按 [AuthSkipReason] 跳过。
+     *
+     * 【probefix1 任务 A 段】绝大多数情况是**零请求**跳过（第 ①②③ 段判定不出认证请求）；
+     * **唯一例外**：认证请求已经发出、而服务端回的失败响应其实是「已在线」
+     * （[AuthSkipReason.ALREADY_ONLINE] 的第二来源）时也返回本类型 —— 语义仍是
+     * 「无需登录、不再重试」，且 code 带 `E_SKIP_` 前缀，因此不消耗退避预算。
+     */
     data class Skipped(
         val reason: AuthSkipReason,
         val currentSsid: String?,
@@ -338,10 +355,11 @@ class AuthFlow(
 
         // 步骤 5（logfix1 任务 C 段：第 ②③ 段判断）：
         //   ② 验证该网络是否为 SRun 认证系统；③ 检查是否已登录。**一次探测同时得到两个答案**。
-        //   结论只有四种（见 ProbeOutcome / artifacts/logfix1/fix-report.md 的判定表）：
-        //     NOT_SRUN → 跳过；ALREADY_ONLINE → 跳过；NOT_LOGGED_IN → 继续第 ④ 段；INDETERMINATE → 跳过并重试。
+        //   结论四种（见 ProbeOutcome）：
+        //     NOT_SRUN → 跳过；ALREADY_ONLINE → 跳过；NOT_LOGGED_IN → 继续第 ④ 段；
+        //     INDETERMINATE → 【probefix1 任务 B 段】**降级为继续第 ④ 段认证**（不再是「跳过并重试」）。
         // 代价：本步是**新增的一次 HTTP GET**（get_challenge）。它只在「已绑定 + 已勾选 + SSID 匹配」时才发生，
-        // 每次运行最多一次；不确定时不再重复探测，而是交给 ProbeRetryCoordinator 的 5 分钟通道。
+        // 每次运行最多一次。
         if (probeGate !== ProbePort.inactive) {
             val probe = probeGate.probe(portalProvider.portal(), credential.username, "")
             val safeUser = AppLog.maskAccount(credential.username)
@@ -357,13 +375,19 @@ class AuthFlow(
                     return AuthFlowOutcome.Skipped(AuthSkipReason.ALREADY_ONLINE, current, effectiveTarget)
                 }
                 ProbeOutcome.INDETERMINATE -> {
-                    val st = probeAttempts?.record(current, clock(), probe.outcome)
-                    lastProbe = st
+                    // 【probefix1 任务 B 段】不确定 → **倾向于尝试认证**（用户口径）：
+                    // 探测只是**优化**（省掉不必要的认证请求）；若探测本身不可靠（超时 / 被校园网
+                    // 网关限速 / 响应形态异常），**不应该阻止真正的登录**。已在线也无害：
+                    // 服务端会回「already online」，由任务 A 段的识别兜住。
+                    // 「5 分钟重试、最多 2 次」通道：**不再需要**（见 fix-report.md 的判断），
+                    // 因此这里**复位**计数而不是 record —— 否则历史遗留的「不确定次数」会在
+                    // ProbeRetryCoordinator.beforeProbe 里把后续认证永久闸掉。
+                    probeAttempts?.reset(current)
+                    lastProbe = null
                     log(
                         "网络检测：WiFi「$current」探测**不确定**（依据：${probe.evidence}）" +
-                            "→ 本次不登录（探测第 ${st?.attempts ?: 1} 次；${ProbeRetryPolicy.describe()}）"
+                            "→ **降级为继续执行认证**（探测只是优化，不应阻止登录；5 分钟重试通道不再使用）"
                     )
-                    return AuthFlowOutcome.Skipped(AuthSkipReason.PROBE_UNCERTAIN, current, effectiveTarget)
                 }
                 ProbeOutcome.NOT_LOGGED_IN -> {
                     probeAttempts?.reset(current)
@@ -385,6 +409,20 @@ class AuthFlow(
         if (result.ok) {
             log("登录执行：成功（服务端 error=${SrunProtocol.OK}，阶段 ${result.stage}，耗时 ${result.elapsedMs}ms，ip 来源 ${result.ipSource}）")
         } else {
+            // 【probefix1 任务 A 段】认证路径的「已在线」识别。用户逐字指示：
+            // 「"You are already online"即代表当前网络已经在线,无需登录」。
+            // 真机实测：服务端对「已登录的网络再登录」返回 code=E2620、
+            // msg="E2620: You are already online."，旧代码把它落成
+            // AuthFailure.REJECTED（界面显示「服务端拒绝（密码错误等）」）并**消耗退避预算重试**。
+            // 判定**复用探测路径的同一份正则**（[SrunProbeClassifier.isAlreadyOnline]，不复制第二份），
+            // 只匹配「已在线」语义：`E2553 密码错误` 之类不会被误判（判定表见 fix-report.md）。
+            if (SrunProbeClassifier.isAlreadyOnline(result.code, result.msg)) {
+                log(
+                    "登录执行：服务端返回**已在线**（code=${result.code}）：${result.msg}" +
+                        " → 视同成功/跳过（不重试、不消耗退避预算）"
+                )
+                return AuthFlowOutcome.Skipped(AuthSkipReason.ALREADY_ONLINE, current, effectiveTarget)
+            }
             log(
                 "登录执行：失败（${result.failure?.displayName ?: "未分类"}，code=${result.code}，" +
                     "阶段 ${result.stage}，耗时 ${result.elapsedMs}ms）：${result.msg}"

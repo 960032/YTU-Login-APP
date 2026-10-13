@@ -50,7 +50,13 @@ enum class ProbeOutcome(val wireName: String) {
     /** 是 SRun 认证系统，且当前**未登录** → 应该执行登录（第 ④ 段）。 */
     NOT_LOGGED_IN("not_logged_in"),
 
-    /** **不确定**（超时 / 网络异常 / 无响应 / 无 `error` 字段的异常形态）→ 走 5 分钟重试机制。 */
+    /**
+     * **不确定**（超时 / 网络异常 / 无响应 / 无 `error` 字段的异常形态）。
+     *
+     * 【probefix1 任务 B 段·口径变更】从「跳过并走 5 分钟重试」改为 **降级为继续认证**
+     * （探测只是优化；探测本身不可靠时不应阻止真正的登录。若网络其实已在线，
+     * 服务端回的「已在线」文案会被 [SrunProbeClassifier.isAlreadyOnline] 兜住）。
+     */
     INDETERMINATE("indeterminate")
 }
 
@@ -99,7 +105,20 @@ interface ProbePort {
  */
 class SrunPortalProbe(
     private val engine: HttpEngine,
-    private val timeoutMs: Int = SrunProtocol.DEFAULT_TIMEOUT_MS
+    private val timeoutMs: Int = SrunProtocol.DEFAULT_TIMEOUT_MS,
+    /**
+     * 【probefix1 任务 C 段】本机 IP 探测（**复用既有能力**：`auth.LocalIpProbe`，
+     * 与 [top.ytu.srunautologin.auth.SrunAuthClient] 是同一套实现）。
+     *
+     * 默认值就是真机实现 [top.ytu.srunautologin.auth.SocketLocalIpProbe]：真机装配点
+     * （`work/AuthWorkWiring.kt`、`ui/MainActivity.kt`）只传 engine，因此修复必须落在默认值上，
+     * 否则改了这里真机依旧发空 `ip=`。传 `null` = 完全不做 Socket 探测（纯离线可用的老行为）。
+     *
+     * 真机实测依据：认证请求（`ip=10.94.80.102`）33ms 返回；探测请求（`ip=` 空串）
+     * TCP 连接超时 15s（SocketTimeoutException）。
+     */
+    private val ipProbe: top.ytu.srunautologin.auth.LocalIpProbe? =
+        top.ytu.srunautologin.auth.SocketLocalIpProbe()
 ) : ProbePort {
 
     override fun probe(portal: String, username: String, ip: String): ProbeResult {
@@ -111,14 +130,17 @@ class SrunPortalProbe(
                 System.currentTimeMillis() - started
             )
         }
-        // ip 为空时**不做 Socket 探测**：get_challenge 允许 ip 为空，服务端响应里的 client_ip
-        // 仍可供后续认证使用。少一次 TCP 连接 = 探测更快、更不易被校园网网关限速。
+        // 【probefix1 任务 C 段】探测请求也带**真实本机 IP**：
+        //   ip 已给出（非空）→ 直接用；
+        //   ip 为空 → 用注入的 ipProbe 做一次 Socket 探测（connect 门户 80 端口 → 读 localAddress）；
+        //   探不到（null / 异常）→ **降级为空串**（get_challenge 允许 ip 为空），不抛异常、不崩。
+        val effectiveIp = resolveProbeIp(host, ip)
         // URL 构造完全复用 SrunRequestBuilder（与认证同一套编码顺序），不重写协议。
         val url = SrunRequestBuilder.buildUrl(
             host + SrunProtocol.PATH_CHALLENGE,
             listOf(
                 "username" to username,
-                "ip" to ip,
+                "ip" to effectiveIp,
                 SrunProtocol.CALLBACK_PARAM to SrunProtocol.CALLBACK_NAME
             )
         )
@@ -139,6 +161,40 @@ class SrunPortalProbe(
         }
         return SrunProbeClassifier.classify(response.status, response.body)
             .copy(elapsedMs = System.currentTimeMillis() - started)
+    }
+
+    /**
+     * 【probefix1 任务 C 段】补齐本机 IP（**不硬编码任何地址**；与 `SrunAuthClient` 的
+     * 「override > client_ip > 本机探测 > 空串」口径一致，这里只做「本机探测」这一档）。
+     *
+     * 探测失败一律返回原值（空串）→ 降级；本方法不抛异常，也不会让探测因取 IP 而失败。
+     */
+    private fun resolveProbeIp(host: String, ip: String): String {
+        if (ip.isNotBlank()) return ip
+        val probe = ipProbe ?: return ip
+        val probed = try {
+            probe.probe(hostOnly(host), HTTP_PORT, IP_PROBE_TIMEOUT_MS)
+        } catch (e: IOException) {
+            null
+        } catch (e: RuntimeException) {
+            null
+        }
+        return if (probed.isNullOrBlank()) ip else probed
+    }
+
+    /** 取纯主机名：`host:port` 去掉端口；`[ipv6]:port` 去掉方括号与端口（Socket 探测只需要主机名）。 */
+    private fun hostOnly(host: String): String {
+        val h = host.trim()
+        if (h.startsWith("[")) return h.substringBefore("]").removePrefix("[")
+        return if (h.count { it == ':' } == 1) h.substringBefore(':') else h
+    }
+
+    companion object {
+        /** 门户 HTTP 端口（get_challenge 走 http）。 */
+        const val HTTP_PORT: Int = 80
+
+        /** 取本机 IP 的超时：5s（探测只是优化，不能先卡满 15s 再发请求）。 */
+        const val IP_PROBE_TIMEOUT_MS: Int = 5_000
     }
 }
 
@@ -190,10 +246,28 @@ class HttpProbeGate(
 /** 纯逻辑判定器：把「HTTP 状态 + 响应体」映射成 [ProbeResult]（零网络、零 Android，可离线核对）。 */
 object SrunProbeClassifier {
 
-    /** 「已在线」类业务码/文案的识别模式（大小写不敏感；真机实测过 `You are already online` 一类响应）。 */
-    private val ALREADY_ONLINE_PATTERN = Regex(
+    /**
+     * 「已在线」类业务码/文案的识别模式（大小写不敏感；真机实测过 `You are already online` 一类响应）。
+     *
+     * 【probefix1 任务 A 段】**单一真源**：探测路径（[classify]）与认证路径（`AuthFlow` 拿到
+     * `srun_portal` 的失败响应之后）**共用同一个正则**，因此它由 `private` 改为可见
+     * （Kotlin 默认即 public）。后续不得再复制第二份「已在线」正则。
+     */
+    val ALREADY_ONLINE_PATTERN = Regex(
         "(?i)(already\\s*online|already\\s*log|已在线|已经在?线|已登录|已经登录|请勿重复登录|重复登录)"
     )
+
+    /**
+     * 【probefix1 任务 A 段】**认证路径**的「已在线」判定：把服务端返回的 code 与 msg 一起送进来。
+     *
+     * 命中 = 服务端说「当前网络已经在线」→ 调用方（`AuthFlow`）按
+     * [ProbeOutcome.ALREADY_ONLINE] 同义处理（跳过、不重试、不消耗退避预算）。
+     *
+     * **只匹配「已在线」语义**：`E2553 密码错误` 一类真正的拒绝文案不含这些关键词，
+     * 因此不会被误判（判定表见 artifacts/probefix1/fix-report.md）。
+     */
+    fun isAlreadyOnline(vararg texts: String?): Boolean =
+        texts.any { !it.isNullOrBlank() && ALREADY_ONLINE_PATTERN.containsMatchIn(it) }
 
     fun classify(httpStatus: Int, body: String): ProbeResult {
         if (httpStatus !in 200..299) {
@@ -278,12 +352,15 @@ data class ProbeAttemptState(
  * 用户口径：探测**不确定**时 → 等 **5 分钟**重试，**最多 2 次重试**（即最多 3 次尝试）；
  * 全部失败 → 记日志不再尝试。
  *
- * 【与既有重试机制的分工（关键：不叠加）】
- *  - 本类只负责「探测不确定」这一种情况，**从不**在不确定时让认证请求发出去
- *    （AuthFlow 直接返回 `E_PROBE_UNCERTAIN`，零认证请求）；
- *  - 因此 [RetryPolicy] 的 5 次指数退避与早上 6:00 的 7 次重试**不会**被这套重试叠加：
- *    只有探测确定（非 SRun / 已在线 / 未登录）时，链路才继续往下走（跳过或进入认证）。
- *  - 状态机的完整图见 artifacts/logfix1/fix-report.md（C 段）。
+ * 【probefix1 任务 B 段之后的分工（口径已变，变更说明逐字留档）】
+ *  - 旧口径（logfix1）：探测不确定 → AuthFlow 返回 `E_PROBE_UNCERTAIN`（零认证请求）→ 本类排 5 分钟重试；
+ *  - 新口径（probefix1·B）：探测不确定 → AuthFlow **降级为继续认证**，不再返回 `E_PROBE_UNCERTAIN`，
+ *    也不为「不确定」写探测记账（只复位计数）。因此本类与 [ProbeAttemptStore]**不再有真机路径使用**，
+ *    `work.ProbeRetryCoordinator.beforeProbe` 的闸门也不会再因「不确定次数用尽」拦住认证
+ *    ——这正是任务 B 要修的行为（旧行为在真机上会把登录永久闸掉）。
+ *  - 之所以**保留而不删除**：`work.ProbeRetryCoordinator` / `work.MorningAuthRuntime` 仍引用这些
+ *    常量与存储（不在本次改动的写权限范围内）；保留一套不再触发的策略常量没有运行期代价。
+ *  - 判断与理由见 artifacts/probefix1/fix-report.md（Bug B 一节）。
  */
 object ProbeRetryPolicy {
 

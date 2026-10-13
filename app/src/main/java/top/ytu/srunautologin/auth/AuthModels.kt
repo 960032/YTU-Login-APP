@@ -103,6 +103,16 @@ data class AuthResult(
 enum class AuthFailure(val displayName: String) {
     NETWORK_UNREACHABLE("网络不可达"),
     PORTAL_UNREACHABLE("门户不可达"),
+
+    /**
+     * 【probefix1 任务 A 段】**真正的**服务端拒绝（密码错误 = `E2553` 一类）。
+     *
+     * 注意：「已在线」**不是**拒绝。服务端对已登录的网络再登录会回
+     * `E2620 You are already online.`，该响应由 `flow.AuthFlow` 在走到本分类器**之前**
+     * 就识别为「已在线」并跳过登录（判定入口 `flow.SrunProbeClassifier.isAlreadyOnline`，
+     * 与探测路径共用同一份正则），因此**不会**落到本分类，也不消耗退避预算。
+     * 判定表见 artifacts/probefix1/fix-report.md（Bug A 一节）。
+     */
     REJECTED("服务端拒绝（密码错误等）"),
     CONFIG_MISSING("配置缺失"),
     PARSE_FAILED("响应解析失败"),
