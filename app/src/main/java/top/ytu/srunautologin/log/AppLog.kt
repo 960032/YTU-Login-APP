@@ -139,16 +139,35 @@ object AppLog {
     private fun parse(raw: String): List<String> =
         if (raw.isBlank()) emptyList() else raw.split("\n").filter { it.isNotEmpty() }
 
-    /** 行格式：`HH:mm:ss 事件`。 */
+    /**
+     * 行格式：`MM-dd HH:mm:ss 事件`（logfix2 任务 A 段：带日期，跨天可分辨）。
+     *
+     * 形参名 `hhmmss` 保持 logfix1 原样不改成 `stamp`：**冻结的离线核对 class 快照按同一份
+     * Kotlin 元数据链接**，改名虽不影响 JVM 签名，但没有任何收益，一律不动（避免命名实参与
+     * Metadata 层面的任何风险）。
+     */
     fun format(hhmmss: String, event: String): String = "$hhmmss $event"
 
-    /** `HH:mm:ss` 格式化（纯 JVM，不依赖 Android DateFormat，便于离线核对）。 */
+    /**
+     * `MM-dd HH:mm:ss` 格式化（**系统本地时间**、24 小时制；纯 JVM，不依赖 Android DateFormat，便于离线核对）。
+     *
+     * 【logfix2 任务 A 段·修复】修复前是 `HH:mm:ss` 且**直接对毫秒取模**
+     * （`((millis/1000) % 86400 + 86400) % 86400`），得到的是 **UTC 墙上时间**，没有加时区偏移 ——
+     * 真机上比本地时间少 8 小时（用户实测：本地约 14:48，日志显示 02:48）。
+     *
+     * 现在用 [java.util.Calendar]（**默认时区 = 系统时区**）取 `HOUR_OF_DAY / MINUTE / SECOND`（24 小时制），
+     * 并在前面补 `MM-dd` 日期：跨天时只看 `HH:mm:ss` 会把「昨天 02:48」与「今天 02:48」混为一谈。
+     * [java.util.Calendar] 是 JDK 类，**不引入任何 Android 依赖**，本文件保持纯 JVM 可离线编译/运行。
+     *
+     * 离线证据（真实编译运行本文件）：artifacts/logfix2/jvm-time-test.txt。
+     */
     fun formatTime(millis: Long): String {
-        val s = (((millis / 1000L) % 86400L) + 86400L) % 86400L
-        val h = (s / 3600L).toInt()
-        val m = ((s % 3600L) / 60L).toInt()
-        val sec = (s % 60L).toInt()
-        return two(h) + ":" + two(m) + ":" + two(sec)
+        val cal = java.util.Calendar.getInstance()
+        cal.timeInMillis = millis
+        val date = two(cal.get(java.util.Calendar.MONTH) + 1) + "-" + two(cal.get(java.util.Calendar.DAY_OF_MONTH))
+        val time = two(cal.get(java.util.Calendar.HOUR_OF_DAY)) + ":" +
+            two(cal.get(java.util.Calendar.MINUTE)) + ":" + two(cal.get(java.util.Calendar.SECOND))
+        return "$date $time"
     }
 
     private fun two(v: Int): String = if (v < 10) "0$v" else v.toString()

@@ -660,84 +660,120 @@ class MainActivity : Activity() {
     }
 
     /**
-     * 【logfix1 任务 D 段】日志窗口（用户要求：点「日志」按钮打开，记录本应用执行与用户输入的所有操作）。
+     * 【logfix1 任务 D 段 / logfix2 任务 C 段】日志窗口（用户要求：点「日志」按钮打开，
+     * 记录本应用执行与用户输入的所有操作；**打开期间要实时同步新日志**）。
      *
      * 零第三方依赖：`android.app.AlertDialog` + `ScrollView` + `TextView`（全部框架原生 View）。
      *
-     * 【刷新方式（acctfix1 已验证的修法，见 artifacts/acctfix1/fix-report.md）】
-     * `AlertDialog.setView()` 在**已显示**之后不会触发窗口重新测量/布局 → 内容变化或清空后屏幕仍是旧内容。
-     * 因此这里**每次刷新都重建一个全新的对话框并 show()**，先 `dismiss()` 旧的（同一时刻至多一个存活）。
+     * 【刷新方式（logfix2 任务 C 段已改）】
+     * logfix1/acctfix1 的旧做法是「**每次刷新都 dismiss 旧的 + show 一个新的**」（为绕开
+     * `AlertDialog.setView()` 在已显示之后不触发重新测量/布局的问题），代价是**每次刷新都把滚动位置归零**。
+     * 现在改成「**弹窗只构建一次，刷新只改 TextView 的 text**」：`TextView.setText` 自身会
+     * requestLayout/invalidate，由 ViewRootImpl 在下一次 traversal 重新测量，不需要重建窗口；
+     * 刷新前后保持滚动位置（必要时下一帧恢复）。
+     *
+     * 用户要求的「打开时会实时同步记录日志」的两个含义都满足：
+     *  - **理解 1（每次打开读最新）**：`render()` 在 `show()` **之前**先读一次存储并画好，
+     *    不会先闪一段旧内容再刷新；
+     *  - **理解 2（开着的时候实时更新）**：`View.postDelayed` 每 `refreshIntervalMs`（1000ms）重读一次并**原地**更新；
+     *    关窗时在 `setOnDismissListener` 里 `removeCallbacks` **取消定时器**（否则泄漏 + 弹窗已关仍在后台空转），
+     *    runnable 内另有 `isShowing` 兜底。
      *
      * 三个动作：
      *  - **可滚动**：ScrollView（固定高度上限，日志越长越需要滚动）；
      *  - **复制全量**：ClipboardManager（`Context.CLIPBOARD_SERVICE`）→ Toast 反馈条数（复制的是**全量**，
-     *    不只是屏幕上渲染的那些）；
-     *  - **清空**：带确认框 → `AppLog.clear` → 重建弹窗显示「暂无日志」。
+     *    不只是屏幕上渲染的那些；与定时刷新无关）；
+     *  - **清空**：带确认框 → `AppLog.clear` → **原地刷新**（覆写中立按钮的默认 dismiss，
+     *    让日志窗在确认期间保持打开，清空后立刻看到那一条「清空日志」）。
      *
      * 渲染上限 [LOG_RENDER_LIMIT]：1000 条一次性塞进一个 TextView 在低端机上会明显卡顿（测量/布局都在主线程），
      * 因此界面只渲染**最近 400 条**并在标题行注明总数与取全量的方式；`复制全部`仍复制 1000 条全量。
      */
     private fun showLogDialog() {
         try {
-            var active: AlertDialog? = null
-            lateinit var refresh: () -> Unit
+            // 【logfix2·C】实时刷新间隔：1000ms。硬要求 >=1s（再短会明显增加主线程测量开销）。
+            val refreshIntervalMs = 1000L
 
-            // 先关旧、再开新：保证「内容变化后一定重新测量/布局」（不依赖 setView 刷新）
-            fun showDialog(next: AlertDialog) {
-                val old = active
-                active = next
-                old?.dismiss()
-                next.show()
+            // 弹窗内的三个 View 在构建时登记，刷新时只改它们的 text（不重建窗口，滚动位置不丢）。
+            var headerTv: TextView? = null
+            var bodyTv: TextView? = null
+            var scrollArea: ScrollView? = null
+
+            // **每次**刷新都重新读一次存储（AppLog.list 内部有「原文未变则复用解析结果」的缓存，
+            // 有新日志就会重新解析，因此这里总是最新数据）。
+            fun currentLines(): List<String> =
+                runCatching { AppLog.list(portalStore) }.getOrDefault(emptyList())
+
+            /** 把最新日志画进当前弹窗（**原地更新文本**；返回全量条数）。 */
+            fun render(): List<String> {
+                val all = currentLines()
+                val shown = if (all.size > LOG_RENDER_LIMIT) all.subList(all.size - LOG_RENDER_LIMIT, all.size) else all
+                val keepScroll = scrollArea?.scrollY ?: 0
+                headerTv?.text = if (all.size > LOG_RENDER_LIMIT) {
+                    getString(R.string.log_showing_recent, shown.size, all.size)
+                } else {
+                    getString(R.string.log_count, all.size)
+                }
+                bodyTv?.text = if (shown.isEmpty()) getString(R.string.log_empty) else shown.joinToString("\n")
+                // 文本变长/变短后滚动位置可能被夹回 0：下一帧恢复，用户阅读位置不跳。
+                val sv = scrollArea
+                if (sv != null && keepScroll > 0) sv.post { sv.scrollY = keepScroll }
+                return all
             }
 
-            fun buildDialog(lines: List<String>): AlertDialog {
-                val shown = if (lines.size > LOG_RENDER_LIMIT) lines.subList(lines.size - LOG_RENDER_LIMIT, lines.size) else lines
-                val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
-                val header = TextView(this).apply {
-                    text = if (lines.size > LOG_RENDER_LIMIT) {
-                        getString(R.string.log_showing_recent, shown.size, lines.size)
-                    } else {
-                        getString(R.string.log_count, lines.size)
-                    }
-                    setTextColor(LINK_BLUE)
-                    setPadding(16, 12, 16, 4)
-                }
-                column.addView(header)
-
-                val body = TextView(this).apply {
-                    text = if (shown.isEmpty()) getString(R.string.log_empty) else shown.joinToString("\n")
-                    textSize = 11f
-                    typeface = android.graphics.Typeface.MONOSPACE
-                    setTextColor(Color.DKGRAY)
-                    setPadding(16, 4, 16, 12)
-                    setTextIsSelectable(true)
-                    gravity = Gravity.START
-                }
-                // 可滚动：ScrollView 包 TextView，并给定最大高度（超出即滚动，不把弹窗撑出屏幕）
-                val scroll = ScrollView(this).apply {
-                    addView(body)
-                    setPadding(0, 0, 0, 0)
-                }
-                column.addView(scroll, LinearLayout.LayoutParams(
-                    LinearLayout.LayoutParams.MATCH_PARENT,
-                    (LOG_DIALOG_MAX_HEIGHT_DP * resources.displayMetrics.density).toInt()
-                ))
-
-                return AlertDialog.Builder(this)
-                    .setTitle(R.string.log_dialog_title)
-                    .setView(column)
-                    .setPositiveButton(R.string.log_copy_all) { _, _ -> copyAllLogs() }
-                    .setNeutralButton(R.string.log_clear) { _, _ -> confirmClearLogs { refresh() } }
-                    .setNegativeButton(R.string.dialog_cancel, null)
-                    .create()
+            val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+            val header = TextView(this).apply {
+                setTextColor(LINK_BLUE)
+                setPadding(16, 12, 16, 4)
             }
-
-            refresh = {
-                val all = runCatching { AppLog.list(portalStore) }.getOrDefault(emptyList())
-                showDialog(buildDialog(all))
+            headerTv = header
+            column.addView(header)
+            val body = TextView(this).apply {
+                textSize = 11f
+                typeface = android.graphics.Typeface.MONOSPACE
+                setTextColor(Color.DKGRAY)
+                setPadding(16, 4, 16, 12)
+                setTextIsSelectable(true)
+                gravity = Gravity.START
             }
-            appLog("用户操作：打开日志窗口")
-            refresh()
+            bodyTv = body
+            // 可滚动：ScrollView 包 TextView，并给定最大高度（超出即滚动，不把弹窗撑出屏幕）
+            val scroll = ScrollView(this).apply { addView(body) }
+            scrollArea = scroll
+            column.addView(scroll, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                (LOG_DIALOG_MAX_HEIGHT_DP * resources.displayMetrics.density).toInt()
+            ))
+
+            // 【理解 1】点「日志」时**先读最新日志再上屏**（show 之前就画好，不会先显示旧内容）。
+            render()
+
+            val dialog = AlertDialog.Builder(this)
+                .setTitle(R.string.log_dialog_title)
+                .setView(column)
+                .setPositiveButton(R.string.log_copy_all) { _, _ -> copyAllLogs() }
+                .setNeutralButton(R.string.log_clear) { _, _ -> confirmClearLogs { render() } }
+                .setNegativeButton(R.string.dialog_cancel, null)
+                .create()
+
+            // 【理解 2 + 自查 E5】开窗期间定时重读并原地刷新。
+            // 用 `View.postDelayed`（View 自带的主线程 Handler，等价 `Handler(Looper.getMainLooper())`，
+            // 行为一致且**不需要新增 import**）；关窗必须取消：onDismiss 里 removeCallbacks。
+            val ticker = object : Runnable {
+                override fun run() {
+                    if (!dialog.isShowing) return
+                    render()
+                    scrollArea?.postDelayed(this, refreshIntervalMs)
+                }
+            }
+            dialog.setOnDismissListener { scrollArea?.removeCallbacks(ticker) }
+
+            dialog.show()
+            // 中立按钮默认「点一下就 dismiss」：覆写掉，让清空确认期间日志窗保持打开（清空后原地刷新即可）。
+            dialog.getButton(AlertDialog.BUTTON_NEUTRAL)?.setOnClickListener {
+                confirmClearLogs { render() }
+            }
+            scrollArea?.postDelayed(ticker, refreshIntervalMs)
         } catch (t: Throwable) {
             // 打开日志窗口失败也绝不能崩：给出可见提示
             Log.e(TAG, "打开日志窗口失败", t)
@@ -745,7 +781,7 @@ class MainActivity : Activity() {
         }
     }
 
-    /** 复制**全量**日志到剪贴板（ClipboardManager，`Context.CLIPBOARD_SERVICE`）。 */
+    /** 复制**全量**日志到剪贴板（ClipboardManager，`Context.CLIPBOARD_SERVICE`；与定时刷新无关）。 */
     private fun copyAllLogs() {
         try {
             val all = runCatching { AppLog.list(portalStore) }.getOrDefault(emptyList())
@@ -759,7 +795,9 @@ class MainActivity : Activity() {
                 return
             }
             cm.setPrimaryClip(ClipData.newPlainText(getString(R.string.log_dialog_title), all.joinToString("\n")))
-            appLog("用户操作：复制全部日志（${all.size} 条）")
+            // 【logfix2 任务 B 段】原来这里会写一条「用户操作：复制全部日志（N 条）」——
+            // 用户要求「日志功能自身的操作不要污染日志」，复制是纯粹的自操作（不含任何诊断价值、可高频），
+            // 已删除。「清空」保留（它是唯一会改变日志内容的操作，见 fix-report.md 的判断与理由）。
             toast(getString(R.string.log_copied, all.size))
         } catch (t: Throwable) {
             Log.e(TAG, "复制日志失败", t)

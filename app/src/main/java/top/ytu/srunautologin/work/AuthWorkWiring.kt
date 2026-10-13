@@ -119,7 +119,12 @@ class AndroidAuthRunEnv(
             store = AuthStatusStore(SrunStorage.keyValueStore(appContext)),
             scheduler = BackoffScheduler(),
             trigger = trigger,
-            minRetryIntervalSeconds = if (minRetryIntervalSeconds > 0L) minRetryIntervalSeconds else this.minRetryIntervalSeconds
+            // 【debouncefix1】按调用方传入的值原样传递，**不做 0 回落**：
+            // 非周期触发（网络变化/开机/手动）由 AuthFlowRunner.kt:61 明确传 0L，语义是「不限制 / 无去抖」；
+            // 周期触发由本文件 :291/:293 显式传 periodicDebounceSeconds()（=450s），周期去抖不受影响。
+            // 修掉的旧写法：`if (minRetryIntervalSeconds > 0L) minRetryIntervalSeconds else this.minRetryIntervalSeconds`
+            // ——它把非周期的 0 回落成周期去抖值 450s，使网络变化在 450s 内只返回 E_WAIT、连探测都不跑。
+            minRetryIntervalSeconds = minRetryIntervalSeconds,
         )
         // 【logfix1 任务 B 段：构造后注入】构造签名逐字冻结（快照按合成默认构造调用），日志缝构造后设置：
         // work 层纯逻辑文件不得 import android（既有离线核对 W42），因此这里传的是「写一行日志」的闭包。

@@ -78,14 +78,25 @@ class AuthWorkCoordinator(
         val previous = store.loadAttemptState()
         val now = clock()
 
-        // ---- 快速返回 1：是否还在退避窗口内（避免周期任务早于退避时刻重复请求） ----
-        if (minRetryIntervalSeconds > 0L && previous.lastAttemptAtMillis > 0L) {
-            val elapsed = (now - previous.lastAttemptAtMillis) / 1000L
+        // ---- 快速返回 1：距「上一次**真发过请求**」是否还不满最小间隔（周期任务去抖） ----
+        // 【logfix2 任务 D 段·根因修复】去抖的基准量必须是上次「真发过请求」的时刻
+        // （[AttemptState.lastRequestAtMillis]，与下面快速返回 2 的退避窗口、[BackoffScheduler.decide]
+        //  用的是同一个量），而**不是**上次「尝试」的时刻：
+        //  零请求的跳过（E_SKIP_*：已在线 / SSID 不匹配 / 读不到 SSID / 探测不确定）一个字节都没发出去，
+        //  它不该武装去抖窗口 —— 否则「已在线 → 跳过」会把随后**真正需要登录**的那次触发堵在门外。
+        //  真机症状（用户日志逐字，periodic=false 也照样被堵）：
+        //    `后台任务结束（trigger=network，outcome=waiting，code=E_WAIT，delay=428s）`
+        //  ——网络变化触发的自动登录被上一次尝试留下的窗口挡住，连探测都没跑（ranFlow=false），
+        //  用户感知就是「自动登录没有按预期工作」。
+        //  真发过请求的失败照旧被拦在窗口外（Portal 防抖语义不变）。
+        val debounceFromMillis = previous.lastRequestAtMillis
+        if (minRetryIntervalSeconds > 0L && debounceFromMillis > 0L) {
+            val elapsed = (now - debounceFromMillis) / 1000L
             if (elapsed < minRetryIntervalSeconds) {
                 return AuthRunResult(
                     outcome = RunOutcome.WAITING,
                     code = "E_WAIT",
-                    message = "距上次尝试仅 ${elapsed}s，低于最小间隔 ${minRetryIntervalSeconds}s，本次不发起请求",
+                    message = "距上次发起认证请求仅 ${elapsed}s，低于最小间隔 ${minRetryIntervalSeconds}s，本次不发起请求",
                     authOk = false,
                     trigger = trigger,
                     attempt = previous.attempts,
