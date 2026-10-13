@@ -33,9 +33,41 @@
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- removemorning1：RECEIVE_BOOT_COMPLETED **仍为删除状态**（开机广播触发通道保持关闭，用户未要求恢复）。
-         restoretoggle1：POST_NOTIFICATIONS / FOREGROUND_SERVICE / FOREGROUND_SERVICE_DATA_SYNC
+    <!-- restoretoggle1：POST_NOTIFICATIONS / FOREGROUND_SERVICE / FOREGROUND_SERVICE_DATA_SYNC
          **已恢复**——用户明确要求「恢复常驻通知（方案 A）」，前台服务的三个权限是其最低必要集。 -->
+
+    <!-- ========================= 防误删告警（persistfix1，真机崩溃后补） =========================
+         RECEIVE_BOOT_COMPLETED —— **只**为满足 JobScheduler.setPersisted(true) 的框架要求而保留。
+
+         【为什么必须有这条权限】
+           Android 规定：`JobInfo.Builder.setPersisted(true)`（让排期跨重启保留）**必须**同时持有
+           `android.permission.RECEIVE_BOOT_COMPLETED`，否则 `JobScheduler.schedule()` 直接抛
+           `IllegalArgumentException: Requested job cannot be persisted without holding
+            android.permission.RECEIVE_BOOT_COMPLETED permission`。
+
+         【与开机广播无关 —— 别把这两件事混为一谈】
+           开机广播接收者（BootCompletedReceiver + BOOT_COMPLETED / LOCKED_BOOT_COMPLETED /
+           MY_PACKAGE_REPLACED 三个 action）**仍然保持删除状态**，由 removemorning1 移除、
+           persistfix1 **未恢复**。「开机时不主动跑一次认证」这个行为**没有恢复**。
+           本权限现在的唯一使用者是 work/AuthScheduler.kt 里的三处 setPersisted(true)：
+             - AndroidAuthScheduler.enqueueAuth（一次性认证排期）
+             - AndroidAuthScheduler.enqueueWorkItem（work queue 追加）
+             - AndroidAuthScheduler.ensurePeriodic（15 分钟周期保底）
+           （其余使用者数量 = 0；开机广播通道已无任何代码。）
+
+         【历史教训 —— removemorning1 的疏漏】
+           removemorning1 删权限时，判据是「该权限已无任何使用者」，但 grep 的是**清单声明**，
+           没有核查它被 `setPersisted(true)` **隐式要求**。结果：Android 13 真机上 WiFi 已开启
+           进入 App → NetworkWatcher.onAvailable → enqueueAuth → schedule() 抛异常 → **进程崩溃**。
+           崩溃堆栈与根因复核见 artifacts/persistfix1/fix-report.md。
+
+         【禁止事项】
+           若将来要删除本权限，**必须先**把 AuthScheduler 里的 setPersisted(true) 一并去掉
+           （或改为 setPersisted(false)），否则会**复现本次崩溃**。
+           现在 AuthScheduler 已有 IllegalArgumentException 兜底 + 不持久化降级，
+           删权限不再等于「必崩」，但会静默丢掉「重启后自动恢复排期」的能力。
+         ============================================================================================ -->
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
 
     <!-- 保留：SCHEDULE_EXACT_ALARM —— 现在归「探测不确定 → 5 分钟重试」的精确闹钟通道使用 -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
@@ -93,7 +125,7 @@
           removemorning1（用户要求「关闭开机广播的触发通道」）：
           B4 触发点 1（开机自启）的静态广播接收者**已整块删除**——接收者类连同
           BOOT_COMPLETED / LOCKED_BOOT_COMPLETED / MY_PACKAGE_REPLACED 三个 action 一并移除，
-          RECEIVE_BOOT_COMPLETED 权限同步删除（全工程已无引用）。
+          RECEIVE_BOOT_COMPLETED 权限在 removemorning1 中同步删除，**persistfix1 已恢复**——唯一原因：JobScheduler.setPersisted(true) 的框架要求，**与开机广播无关**；接收者本身**未恢复**。
           进程被杀后的兜底改为：周期保底（15 分钟 JobScheduler，App.onCreate 注册）+ 网络变化（动态注册）。
         -->
 

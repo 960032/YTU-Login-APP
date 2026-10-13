@@ -5,6 +5,7 @@ import android.app.job.JobScheduler
 import android.app.job.JobWorkItem
 import android.content.ComponentName
 import android.content.Context
+import top.ytu.srunautologin.log.AppLog
 
 /**
  * ============================ Android 调度层（JobScheduler 方案）============================
@@ -69,29 +70,41 @@ class AndroidAuthScheduler(
      *
      * @param delayMillis 延迟毫秒（0 = 尽快）。用 `setMinimumLatency` 实现，
      *        因此**不使用 expedited**（expedited 不允许最小延迟，且 Android 12+ 有配额限制）。
+     *
+     * 【persistfix1 加固】`setPersisted(true)` 要求持有 `RECEIVE_BOOT_COMPLETED`
+     * （见 AndroidManifest 的防误删告警块）。权限一旦缺失，`schedule()` 抛的是
+     * **IllegalArgumentException**（不是 SecurityException），旧代码只捕 SecurityException →
+     * 异常穿透到系统回调（NetworkWatcher 的 HandlerThread）→ **进程崩溃**。
+     * 现在：捕 RuntimeException + 记日志 + 降级为 setPersisted(false) 重试一次。
      */
     fun enqueueAuth(delayMillis: Long, reason: String): Boolean {
         val scheduler = js ?: return false
         val safeDelay = delayMillis.coerceIn(0L, AuthJobs.MAX_DELAY_MILLIS)
-        val info = JobInfo.Builder(AuthJobs.JOB_ID_AUTH_ONCE, AuthJobs.component(appContext))
-            .setMinimumLatency(safeDelay)
+        return try {
+            scheduler.schedule(buildAuthInfo(safeDelay, persisted = true))
+            recordSchedule(reason, safeDelay)
+            true
+        } catch (e: RuntimeException) {
+            handleScheduleFailure(e, reason, reason) {
+                scheduler.schedule(buildAuthInfo(safeDelay, persisted = false))
+                recordSchedule("$reason:UNPERSISTED", safeDelay)
+                true
+            }
+        }
+    }
+
+    /** 构造一次性认证的 [JobInfo]；[persisted] = 是否要求「排期跨重启保留」（需 RECEIVE_BOOT_COMPLETED）。 */
+    private fun buildAuthInfo(delayMillis: Long, persisted: Boolean): JobInfo =
+        JobInfo.Builder(AuthJobs.JOB_ID_AUTH_ONCE, AuthJobs.component(appContext))
+            .setMinimumLatency(delayMillis)
             .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
-            .setPersisted(true)
+            .setPersisted(persisted)
             .setBackoffCriteria(
                 JobInfo.DEFAULT_INITIAL_BACKOFF_MILLIS,
                 JobInfo.BACKOFF_POLICY_EXPONENTIAL
             )
             .build()
-        return try {
-            scheduler.schedule(info)
-            recordSchedule(reason, safeDelay)
-            true
-        } catch (e: SecurityException) {
-            // 权限被系统收紧（例如 HyperOS 限制自启动）：静默降级为「未排期」，由周期任务兜底
-            recordSchedule("$reason:REJECTED(${e.javaClass.simpleName})", safeDelay)
-            false
-        }
-    }
+
 
     /** 排期一次性认证的**替换式**入队（同 jobId 覆盖旧排期，不会堆积）。 */
     fun enqueueAuthReplacing(delayMillis: Long, reason: String): Boolean = enqueueAuth(delayMillis, reason)
@@ -102,7 +115,7 @@ class AndroidAuthScheduler(
      */
     fun enqueueWorkItem(reason: String): Boolean {
         val scheduler = js ?: return false
-        val info = JobInfo.Builder(AuthJobs.JOB_ID_AUTH_ONCE, AuthJobs.component(appContext))
+        val persistedInfo = JobInfo.Builder(AuthJobs.JOB_ID_AUTH_ONCE, AuthJobs.component(appContext))
             .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
             .setPersisted(true)
             .setBackoffCriteria(
@@ -111,18 +124,20 @@ class AndroidAuthScheduler(
             )
             .build()
         return try {
-            val res = scheduler.enqueue(info, JobWorkItem(android.content.Intent().putExtra(EXTRA_REASON, reason)))
+            val res = scheduler.enqueue(persistedInfo, JobWorkItem(android.content.Intent().putExtra(EXTRA_REASON, reason)))
             if (res == JobScheduler.RESULT_SUCCESS) {
                 recordSchedule(reason, 0L)
                 true
             } else {
                 false
             }
-        } catch (e: SecurityException) {
-            recordSchedule("$reason:REJECTED(${e.javaClass.simpleName})", 0L)
-            false
+        } catch (e: RuntimeException) {
+            // persistfix1：同 enqueueAuth —— 权限缺失时 schedule/enqueue 抛 IllegalArgumentException（非 SecurityException）。
+            // 降级：去掉 setPersisted(true) 重试一次，绝不把异常放回系统回调。
+            handleScheduleFailure(e, "work_item:$reason", reason) { scheduler.schedule(buildAuthInfo(0L, persisted = false)).let { recordSchedule("$reason:UNPERSISTED", 0L); true } }
         }
     }
+
 
     /**
      * 注册周期保底任务（15 分钟一次，带 5 分钟弹性，允许在计费网络/离线时暂缓）。
@@ -130,21 +145,60 @@ class AndroidAuthScheduler(
      */
     fun ensurePeriodic(): Boolean {
         val scheduler = js ?: return false
-        val info = JobInfo.Builder(AuthJobs.JOB_ID_PERIODIC, AuthJobs.component(appContext))
+        return try {
+            scheduler.schedule(buildPeriodicInfo(persisted = true))
+            true
+        } catch (e: RuntimeException) {
+            // persistfix1：权限缺失 → IllegalArgumentException；降级为不持久化的周期排期（功能仍可用）。
+            handleScheduleFailure(e, "periodic", "periodic") {
+                scheduler.schedule(buildPeriodicInfo(persisted = false))
+                true
+            }
+        }
+    }
+
+    /** 构造周期保底任务的 [JobInfo]；[persisted] 含义同 [buildAuthInfo]。 */
+    private fun buildPeriodicInfo(persisted: Boolean): JobInfo =
+        JobInfo.Builder(AuthJobs.JOB_ID_PERIODIC, AuthJobs.component(appContext))
             .setPeriodic(
                 AuthJobs.PERIODIC_INTERVAL_MINUTES * 60_000L,
                 AuthJobs.PERIODIC_FLEX_MINUTES * 60_000L
             )
             .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
-            .setPersisted(true)
+            .setPersisted(persisted)
             .build()
-        return try {
-            scheduler.schedule(info)
-            true
-        } catch (e: SecurityException) {
-            false
-        }
+
+    /**
+     * persistfix1 统一的排期失败处置：**先记日志（绝不静默），再尝试降级 [fallback]**。
+     *
+     * 为什么不区分异常类型：`schedule()` 可能抛 SecurityException（权限被 OEM 收紧）、
+     * IllegalArgumentException（setPersisted 缺 RECEIVE_BOOT_COMPLETED，**本次真机崩溃**）
+     * 或 IllegalStateException（JobService 未声明等）。它们都**起源于系统回调线程**，
+     * 穿透即进程崩溃 → 一律兜住。
+     *
+     * @param tag 日志标签（who 失败）；[reason] 业务原因；[fallback] 降级动作（返回是否成功）。
+     */
+    private fun handleScheduleFailure(e: RuntimeException, tag: String, reason: String, fallback: () -> Boolean): Boolean {
+        // 1) 记日志：两条通道 —— AuthWorkWiring.progress（进度键，真机在应用信息里可读）
+        //    与 AppLog.record（界面「日志」窗口可见）。AppLog 内部已 runCatching + 脱敏，不会抛。
+        val detail = "$tag 排期被系统拒绝：${e.javaClass.simpleName}: ${e.message}"
+        recordSchedule("$reason:REJECTED(${e.javaClass.simpleName})", -1L)
+        runCatching { AuthWorkWiring.progress(appContext, detail) }
+        runCatching { AppLog.record(AuthWorkWiring.keyValueStore(appContext), detail) }
+        // 2) 降级：去掉 setPersisted(true) 重试一次（权限被误删时功能仍可用，只是重启后需重开 App）。
+        return runCatching { fallback() }
+            .onSuccess {
+                runCatching { AuthWorkWiring.progress(appContext, "$reason: 已降级为不持久化排期（重启后需重开 App 才恢复排期）") }
+                runCatching { AppLog.record(AuthWorkWiring.keyValueStore(appContext), "$reason: 降级为 setPersisted(false) 排期成功") }
+            }
+            .onFailure { fallbackError ->
+                val failDetail = "$reason: 降级排期同样失败：${fallbackError.javaClass.simpleName}: ${fallbackError.message}"
+                runCatching { AuthWorkWiring.progress(appContext, failDetail) }
+                runCatching { AppLog.record(AuthWorkWiring.keyValueStore(appContext), failDetail) }
+            }
+            .getOrDefault(false)
     }
+
 
     /** 取消全部排期（用户关闭自动登录时使用；本版本 UI 未暴露，保留给后续版本）。 */
     fun cancelAll() {
