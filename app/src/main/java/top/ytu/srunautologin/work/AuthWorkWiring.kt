@@ -9,7 +9,9 @@ import top.ytu.srunautologin.flow.AuthFlow
 import top.ytu.srunautologin.flow.CoreWifiSnapshotPort
 import top.ytu.srunautologin.flow.MapWifiAccountLookup
 import top.ytu.srunautologin.flow.PortalProvider
+import top.ytu.srunautologin.flow.ProbeAttemptStore
 import top.ytu.srunautologin.flow.StoredPortalProvider
+import top.ytu.srunautologin.log.AppLog
 import top.ytu.srunautologin.net.WifiSnapshotCore
 import top.ytu.srunautologin.platform.AndroidWifiPermissionFlow
 import top.ytu.srunautologin.platform.AndroidWifiSource
@@ -44,6 +46,16 @@ object AndroidAuthTransportFactory : top.ytu.srunautologin.flow.AuthTransportFac
         ipProbe = SocketLocalIpProbe()
     )
 }
+
+/**
+ * 【logfix1 任务 C 段】探测端口装配：`SrunPortalProbe` = 一次 `get_challenge` GET + [SrunProbeClassifier] 判定。
+ *
+ * 复用既有 `HttpUrlConnectionEngine`（与认证同一套超时/重定向/UA 行为），不新写任何 HTTP 代码；
+ * **网络请求发生在调用它的线程上** → 本函数只在 worker 线程链路里被使用（JobService / 闹钟后台线程 /
+ * 「立即登录」的后台线程），满足「探测必须在后台线程」这条硬约束。
+ */
+fun androidProbeGate(): top.ytu.srunautologin.flow.ProbePort =
+    top.ytu.srunautologin.flow.SrunPortalProbe(HttpUrlConnectionEngine())
 
 /** Portal 地址回落到代码默认值 [AuthFlow.DEFAULT_PORTAL]（不重复写字面量；真机用下面的工厂）。 */
 object DefaultPortalProvider : PortalProvider {
@@ -92,6 +104,15 @@ class AndroidAuthRunEnv(
             wifiSnapshot = CoreWifiSnapshotPort(wifiSnapshot),
             transport = AndroidAuthTransportFactory.create(),
             portalProvider = portalProviderFrom(appContext)
+        // 【logfix1 任务 C/B 段：构造后注入】构造签名**逐字冻结**（既有离线核对快照按合成默认构造调用），
+        // 因此探测端口与日志 Context 一律在构造完成后装配：
+        //  - probeGate：第 ②③ 段判断（SRun 验证 + 是否已登录），一次探测同时得到两个答案；
+        //  - probeAttempts：探测重试计数（键 srun_probe_attempt_v1，与认证/早上计数不同的键）；
+        //  - logContext：把 SSID 读取/匹配、SRun 判定、登录开始与结果写进应用内日志。
+        ).withProbeAndLog(
+            probeGate = androidProbeGate(),
+            probeAttempts = ProbeAttemptStore(SrunStorage.keyValueStore(appContext)),
+            logContext = appContext
         )
         val coordinator = AuthWorkCoordinator(
             flow = flow,
@@ -100,6 +121,9 @@ class AndroidAuthRunEnv(
             trigger = trigger,
             minRetryIntervalSeconds = if (minRetryIntervalSeconds > 0L) minRetryIntervalSeconds else this.minRetryIntervalSeconds
         )
+        // 【logfix1 任务 B 段：构造后注入】构造签名逐字冻结（快照按合成默认构造调用），日志缝构造后设置：
+        // work 层纯逻辑文件不得 import android（既有离线核对 W42），因此这里传的是「写一行日志」的闭包。
+        coordinator.log = { line -> AppLog.record(SrunStorage.keyValueStore(appContext), line) }
         // 目标 SSID 的「选择」在 AuthFlowRunner.targetOf 里完成（只读用户绑定集合，不做匹配判定）
         return AuthRun(coordinator, AuthFlowRunner.readCurrentSsid(this))
     }
@@ -182,6 +206,47 @@ object AuthWorkWiring {
         val appContext = context.applicationContext
         val env = AndroidAuthRunEnv(appContext, periodicDebounceSeconds())
         val at = System.currentTimeMillis()
+        val logStore = SrunStorage.keyValueStore(appContext)
+
+        // ---- 【logfix1 任务 C 段】探测重试闸门（周期任务两选一） ----
+        // 周期保底每 15 分钟醒一次，而探测重试间隔是 5 分钟 → 周期任务自然能覆盖「5 分钟后再探」，
+        // 不需要额外排闹钟（排了也不会更准，Doze 下同样会被推迟）。
+        // 手动触发（periodic=false）时**跳过闸门并复位计数**：用户显式点了「立即登录」，
+        // 必须立刻真测一次，而不是被上一轮的不确定状态挡在门外。
+        val gateSsid = targetOverride?.trim()?.takeIf { it.isNotEmpty() } ?: env.currentSsid()
+        if (periodic) {
+            when (
+                ProbeRetryCoordinator.beforeProbe(
+                    kv = logStore,
+                    ssid = gateSsid,
+                    probeEnabled = true,
+                    nowMillis = at,
+                    scheduleRetry = { retryAt -> MorningAuthRuntime.scheduleProbeRetry(appContext, retryAt) }
+                )
+            ) {
+                ProbeRetryCoordinator.Action.WAIT, ProbeRetryCoordinator.Action.GIVE_UP -> {
+                    val msg = "探测闸门（周期任务）：距上次探测不足 5 分钟或重试额度已用尽 → 本次不探测、不登录"
+                    runCatching { AppLog.record(logStore, "调度：[periodic] $msg") }
+                    val r = AuthRunResult(
+                        outcome = RunOutcome.WAITING,
+                        code = "E_PROBE_WAIT",
+                        message = msg,
+                        authOk = false,
+                        trigger = trigger,
+                        attempt = 0,
+                        attemptsConsumed = false,
+                        finishedAtMillis = at,
+                        delaySeconds = 0L,
+                        ranFlow = false,
+                        statusLine = ""
+                    )
+                    return r
+                }
+                else -> Unit
+            }
+        } else {
+            ProbeRetryCoordinator.reset(logStore, gateSsid)
+        }
 
         // ---- 快速返回 0：WiFi 权限被拒/未授予 → 读不到 SSID，**终态**处理 ----
         // 若在这里退回 E_SKIP_NO_SSID，会变成「每 30 秒空转一次」的常驻唤醒（读不到 SSID 永远成立）。
@@ -229,7 +294,27 @@ object AuthWorkWiring {
         // 目标 SSID 的「选择」全部在 AuthFlowRunner.targetOf 里（纯 JVM 可离线验证）
         val target = targetOverride?.trim()?.takeIf { it.isNotEmpty() }
             ?: AuthFlowRunner.targetOf(currentSsid, configuredTarget = null, boundSsids = bound)
-        return run.coordinator.run(target)
+        // 【logfix1 任务 B 段】调度触发：把「谁唤起了这次认证、目标网络是哪个」写进应用内日志
+        runCatching {
+            AppLog.record(
+                logStore,
+                "调度：后台认证触发（trigger=${trigger.wireName}，periodic=$periodic，" +
+                    "当前 SSID=${currentSsid ?: "未读到"}，目标 SSID=${target ?: "无"}）"
+            )
+        }
+        val result = run.coordinator.run(target)
+        // 【logfix1 任务 B 段】重试排期：把「第几次 + 延迟多少秒」记下来（与 AuthJobService 的
+        // enqueueAuth 一一对应；在这里记是因为它同时覆盖 JobService 与「原地 run」两条调用路径）。
+        if (result.outcome == RunOutcome.RETRY_SCHEDULED || result.outcome == RunOutcome.SKIPPED_ZERO_REQUEST) {
+            runCatching {
+                AppLog.record(
+                    logStore,
+                    "调度：安排重试（第 ${result.attempt}/${maxAttempts(appContext)} 次，延迟 ${result.delaySeconds}s，" +
+                        "原因 ${result.code}）"
+                )
+            }
+        }
+        return result
     }
 
     /** 开机/网络恢复后调用：注册周期保底并排一次尽快认证。 */

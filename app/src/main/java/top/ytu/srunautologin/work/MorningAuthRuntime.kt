@@ -131,6 +131,27 @@ object MorningAuthRuntime {
         return at
     }
 
+    /**
+     * 【logfix1 任务 C 段：探测重试通道】安排一次「探测不确定」的重试闹钟。
+     *
+     * 用户决策：探测不确定 → 等 **5 分钟**重试，最多 **2 次**（共 3 次探测），全败记日志、不再尝试。
+     *
+     * 为什么复用本类的闹钟而不新开一套：既有的 [MorningAlarmReceiver] 已经是「时间到了就在后台
+     * 线程跑一段判定链」的成熟通道（goAsync + 后台线程 + 开关守卫 + 让路窗口），
+     * 探测重试与它**同类**；新开一条通道只会让「到底有几套重试在跑」变得不可读。
+     * 本方法只改变**触发时刻**（5 分钟 vs 10 分钟），触发后的判定链完全同一条。
+     */
+    fun scheduleProbeRetry(context: Context, atMillis: Long): Long {
+        val ctx = context.applicationContext
+        fire(ctx, atMillis, "retry-probe-5min")
+        AuthWorkWiring.progress(
+            ctx,
+            "网络检测：安排探测重试（${AuthStatusStore.formatTime(atMillis)}，间隔 " +
+                "${top.ytu.srunautologin.flow.ProbeRetryPolicy.RETRY_DELAY_MS / 60_000} 分钟）"
+        )
+        return atMillis
+    }
+
     /** 真正落一次闹钟（两个 API 分支都返回；异常不吞、由调用方 try/catch 兜住）。 */
     private fun fire(context: Context, atMillis: Long, reason: String) {
         val am = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
@@ -228,6 +249,13 @@ class MorningAlarmReceiver : BroadcastReceiver() {
      *  4. 其余 → 记一次尝试（+1，持久化）→ 交给既有认证链路 → 按结果决定是否排 +10 分钟重试。
      */
     private fun handle(ctx: Context, reason: String) {
+        // 【logfix1 任务 B 段】调度埋点：闹钟（06:00 / +10 分钟重试 / 探测重试）真的被系统唤醒了
+        runCatching {
+            top.ytu.srunautologin.log.AppLog.record(
+                top.ytu.srunautologin.platform.SrunStorage.keyValueStore(ctx),
+                "调度：定时闹钟触发（reason=$reason，时刻 ${AuthStatusStore.formatTime(System.currentTimeMillis())}）"
+            )
+        }
         if (!MorningAuthRuntime.isEnabled(ctx)) {
             AuthWorkWiring.progress(ctx, "早上例程($reason)：自动登录已停用 → 直接返回（不排期、不认证）")
             return
@@ -271,6 +299,29 @@ class MorningAlarmReceiver : BroadcastReceiver() {
         }
 
         // 交给既有认证链路（JobScheduler 单通道）：它内部会复用 AuthFlow 的 SSID 匹配跳过逻辑
+        // 【logfix1 任务 C 段】但先过「探测重试闸门」：
+        //   ① 距上次探测不足 5 分钟 → 让路（不探测、不认证）；
+        //   ② 探测重试额度已用尽（3 次都不确定）→ 记日志、不再尝试。
+        // 让路的判断放在**发起认证之前**，否则「闸门」会退化成事后检查，仍然会多发请求。
+        val targetSsid = runCatching {
+            AuthWorkWiring.keyValueStore(ctx)
+            top.ytu.srunautologin.platform.SrunStorage.wifiAccountMap(ctx).mapping().keys.firstOrNull()
+        }.getOrNull()
+        val probeGate = ProbeRetryCoordinator.beforeProbe(
+            kv = SrunStorage.keyValueStore(ctx),
+            ssid = targetSsid,
+            probeEnabled = true,
+            nowMillis = now,
+            scheduleRetry = { at -> MorningAuthRuntime.scheduleProbeRetry(ctx, at) }
+        )
+        if (probeGate == ProbeRetryCoordinator.Action.WAIT || probeGate == ProbeRetryCoordinator.Action.GIVE_UP) {
+            top.ytu.srunautologin.log.AppLog.record(
+                SrunStorage.keyValueStore(ctx),
+                "调度：早上例程($reason) 探测闸门=$probeGate → 本次不发起登录"
+            )
+            return
+        }
+
         val enqueued = try {
             AuthWorkWiring.scheduler(ctx).enqueueAuth(
                 delayMillis = 0L,

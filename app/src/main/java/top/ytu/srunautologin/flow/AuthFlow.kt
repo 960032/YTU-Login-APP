@@ -4,6 +4,8 @@ import top.ytu.srunautologin.auth.AuthFailure
 import top.ytu.srunautologin.auth.AuthRequest
 import top.ytu.srunautologin.auth.AuthResult
 import top.ytu.srunautologin.auth.AuthTransport
+import top.ytu.srunautologin.auth.SrunProtocol
+import top.ytu.srunautologin.log.AppLog
 import top.ytu.srunautologin.net.WifiPermissionFlow
 import top.ytu.srunautologin.net.WifiPermissionRequestOutcome
 import top.ytu.srunautologin.net.WifiPermissionState
@@ -15,13 +17,20 @@ import top.ytu.srunautologin.storage.WifiAccountMap
 /**
  * 认证编排（模块 flow）——纯逻辑，不引用任何 Android API，可离线测试。
  *
- * 流程：读当前 SSID → 查 WiFi↔账号绑定（label）→ 取凭据 → 调认证客户端 → 记录结果。
+ * 流程（logfix1 任务 C 段改造后的**四段判断链**，用户原话逐段对应）：
+ *   ① 读当前 SSID → 与已存储的网络比对（WiFi↔账号绑定 + 已勾选判定）→ 不匹配：跳过（记日志）；
+ *   ② 验证该网络是否为 SRun 认证系统（探测 [ProbePort]）→ 不是：跳过（记日志「非 SRun 系统」）；
+ *   ③ 检查网络是否已登录（**与 ② 同一次探测**，不多打 Portal）→ 已登录：跳过（记日志「已在线」）；
+ *   ④ 未登录 → 取凭据 → 调认证客户端执行登录。
  *
- * 【B8 判据】只有当**当前 SSID 与已绑定的目标 SSID 匹配**时才发起认证；
+ * ② ③ 不确定（超时/无响应/无 error 字段）时 → 返回 [AuthSkipReason.PROBE_UNCERTAIN]（零认证请求），
+ * 由 [ProbeRetryPolicy] 的「5 分钟、最多 2 次重试」通道接管（见 artifacts/logfix1/fix-report.md 状态机）。
+ *
+ * 【B8 判据（未改）】只有当**当前 SSID 与已绑定的目标 SSID 匹配**时才发起认证；
  * 不匹配时**不发任何请求**（零次 transport 调用），返回 [AuthSkipReason] 描述的 Skipped 结果。
  *
- * 依赖全部通过接口注入（[CredentialLookup] / [WifiAccountLookup] / [WifiSnapshotPort] / [AuthTransport]），
- * 因此可在 JVM 上用手写假实现完成离线验证——不需要真机、不需要网络。
+ * 依赖全部通过接口注入（[CredentialLookup] / [WifiAccountLookup] / [WifiSnapshotPort] / [AuthTransport] /
+ * [ProbePort]），因此可在 JVM 上用手写假实现完成离线验证——不需要真机、不需要网络。
  */
 
 /* ============================ 依赖端口 ============================ */
@@ -84,7 +93,29 @@ enum class AuthSkipReason(val code: String) {
     SSID_NOT_BOUND("E_SKIP_UNBOUND"),
 
     /** 当前 SSID 已绑定，但**与本次认证的目标 SSID 不一致**。 */
-    SSID_MISMATCH("E_SKIP_SSID_MISMATCH")
+    SSID_MISMATCH("E_SKIP_SSID_MISMATCH"),
+
+    /* ---- logfix1 任务 C 段（用户要求新增的第 ②③ 段判断）：探测不通过时跳过 ---- */
+
+    /**
+     * 【第 ② 段】探测结论：该网络**不是 SRun 认证系统** → 跳过登录（零认证请求）。
+     * 用户原话：「验证该网络是否为SRun认证系统，若为该系统则检查网络是否已登录」。
+     */
+    NOT_SRUN("E_SKIP_NOT_SRUN"),
+
+    /**
+     * 【第 ③ 段】探测结论：**已登录**（服务端返回「已在线」类业务码）→ 跳过登录。
+     * 用户原话：「检查网络是否已登录，若未登录则执行自动登录」。
+     */
+    ALREADY_ONLINE("E_SKIP_ALREADY_ONLINE"),
+
+    /**
+     * 【第 ②③ 段】探测**不确定**（超时 / 无响应 / 无 error 字段）→ 本次不登录，
+     * 交给 [ProbeRetryPolicy] 的「5 分钟、最多 2 次重试」通道。
+     * 注意：本值是**零请求跳过**（`E_SKIP_` 前缀），因此**不消耗** [AuthWorkCoordinator] 的退避预算，
+     * 也不会与早上 6:00 的 7 次重试叠加（完整状态机见 artifacts/logfix1/fix-report.md）。
+     */
+    PROBE_UNCERTAIN("E_SKIP_PROBE_UNCERTAIN")
 }
 
 /** AuthFlow 的最终结果：Skipped（零请求）或 Done（真的调用过认证客户端）。 */
@@ -115,6 +146,13 @@ object AuthSkip {
                 "当前 WiFi「${outcome.currentSsid}」未绑定账号，未发起认证"
             AuthSkipReason.SSID_MISMATCH ->
                 "当前 WiFi「${outcome.currentSsid}」与目标 WiFi「${outcome.targetSsid}」不一致，未发起认证"
+            AuthSkipReason.NOT_SRUN ->
+                "当前 WiFi「${outcome.currentSsid}」不是 SRun 认证系统，未发起认证（判定依据见日志）"
+            AuthSkipReason.ALREADY_ONLINE ->
+                "当前 WiFi「${outcome.currentSsid}」已处于登录状态，无需重复登录"
+            AuthSkipReason.PROBE_UNCERTAIN ->
+                "无法确认当前 WiFi「${outcome.currentSsid}」是否为 SRun 系统及其登录状态" +
+                    "（探测不确定，将按 5 分钟间隔最多重试 2 次），本次未发起认证"
         }
         return AuthResult(
             ok = false,
@@ -137,6 +175,16 @@ object AuthSkip {
  * @param transport    认证客户端（网络层注入点）
  * @param portalProvider Portal 主机地址提供者
  * @param clock        取当前时间（毫秒），便于离线测试注入固定时钟
+ * @param probeGate    【logfix1 任务 C 段】**SRun 探测端口**（真机 `SrunPortalProbe`）。
+ *                     默认 [ProbePort.inactive] = 不启用探测 → 行为与改造前完全一致（老调用点/离线核对不受影响）。
+ *                     即 `probeGate` 只负责「发一次 get_challenge 并给结论」，判断链的走向仍由本类唯一决定。
+ * @param probeAttempts 【logfix1 任务 C 段】探测重试计数（键 `srun_probe_attempt_v1`）。
+ *                     非 null 时：探测出确定结论会复位计数；不确定时会记一次并写日志。
+ *                     为 null（默认）= 纯内存流程（离线核对的老调用点），不做任何持久化。
+ *                     注意：**不确定时的 5 分钟重试排期不在这里**，由 [top.ytu.srunautologin.work.ProbeRetryCoordinator]
+ *                     统一负责（保证与既有 RetryPolicy / 早上 7 次重试不叠加）。
+ * @param logContext   【logfix1 任务 B 段】日志写入用的 Android Context（真机传 applicationContext）。
+ *                     为 null 时本类不写应用内日志（离线核对的纯 JVM 场景）。
  */
 class AuthFlow(
     private val credentials: CredentialLookup,
@@ -152,6 +200,44 @@ class AuthFlow(
     private val clock: () -> Long = { System.currentTimeMillis() }
 ) {
 
+    /**
+     * 【logfix1 任务 C 段】SRun 探测端口（第 ②③ 段判断的注入点）。
+     *
+     * **为什么是可变属性 + 构造后 setter，而不是新增构造参数**（这是本次踩过的真坑）：
+     * 既有离线核对程序（`verify-common-client` / `android-ci` 的**既有 class 快照**）是按
+     * 「7 个参数 + 1 个默认掩码」的**合成默认构造**直接调用的：
+     * `(CredentialLookup, WifiAccountLookup, EnabledAccountLookup, WifiSnapshotPort, AuthTransport,
+     * PortalProvider, Function0<Long>, int, DefaultConstructorMarker)`。
+     * 只要在构造参数列表里新增/移动任何一项，Kotlin 生成的合成默认构造的 JVM 描述符就会变
+     * （实测：新增 3 个参数后变成 12 个参数），快照侧立刻抛
+     * `java.lang.NoSuchMethodError: 'void ...AuthFlow.<init>(...Function0, int, DefaultConstructorMarker)'`
+     * ——run-verification 两次实测都抓到（见 artifacts/logfix1/verify-proof.txt）。
+     *
+     * 因此**构造签名保持逐字冻结**，探测相关的三个依赖改为构造后注入：
+     *  - 不设置 → 行为与改造前完全一致（`ProbePort.inactive`、不记账、不写日志）；
+     *  - 真机装配点（`AndroidAuthRunEnv.buildRun` / `MainActivity.buildAuthFlow`）在创建后立即设置。
+     * 这三个属性只在**装配期**（构造完成后立刻）写入，运行期只读，因此不引入并发风险。
+     */
+    var probeGate: ProbePort = ProbePort.inactive
+
+    /** 【logfix1 任务 C 段】探测重试计数（键 `srun_probe_attempt_v1`；null = 不记账）。 */
+    var probeAttempts: ProbeAttemptStore? = null
+
+    /** 【logfix1 任务 B 段】日志写入用的 Android Context（null = 不写应用内日志，纯 JVM 场景）。 */
+    var logContext: android.content.Context? = null
+
+    /** 【logfix1 任务 C 段 / B 段】一次性装配探测与日志依赖（构造后调用；返回自身便于链式书写）。 */
+    fun withProbeAndLog(
+        probeGate: ProbePort,
+        probeAttempts: ProbeAttemptStore?,
+        logContext: android.content.Context?
+    ): AuthFlow {
+        this.probeGate = probeGate
+        this.probeAttempts = probeAttempts
+        this.logContext = logContext
+        return this
+    }
+
     /** 记录最近一次结果（供状态显示区读取；失败不静默）。 */
     var lastResult: AuthResult? = null
         private set
@@ -162,6 +248,18 @@ class AuthFlow(
     var lastOutcome: AuthFlowOutcome? = null
         private set
 
+    /** 【logfix1 任务 B 段】上一次记录的 SSID（仅用于「检测到网络变化」这一条日志，不参与任何判定）。 */
+    private var lastLoggedSsid: String? = "<首次运行>"
+
+    /**
+     * 【logfix1 任务 C 段】最近一次探测的记账状态（供调度层写「探测第几次」的日志）。
+     * 仅当装配了 [probeAttempts] 且真的探测过时非 null；不参与任何判定。
+     */
+    val lastProbeState: ProbeAttemptState? get() = lastProbe
+
+    /** 最近一次探测的进度（内部字段，由探测分支写入）。 */
+    private var lastProbe: ProbeAttemptState? = null
+
     /**
      * 执行一次自动认证。
      *
@@ -171,6 +269,17 @@ class AuthFlow(
     fun run(targetSsid: String?): AuthFlowOutcome {
         val started = clock()
         val current = wifiSnapshot.currentSsid()
+        // 【logfix1 任务 B 段·网络检测埋点 2】SSID 读取结果（读到什么 / 为什么读不到），
+        // 并顺带标记「检测到网络变化」（相邻两次读到的 SSID 不同）。
+        if (current != null && current != lastLoggedSsid) {
+            log("网络检测：检测到网络变化（上次「$lastLoggedSsid」，当前「$current」）")
+        }
+        lastLoggedSsid = current
+        if (current == null) {
+            log("网络检测：未能读到当前 SSID（可能是未连接 WiFi / 未授予位置信息权限 / 系统未返回）→ 跳过登录")
+        } else {
+            log("网络检测：当前 SSID=「$current」")
+        }
         val outcome = runInternal(targetSsid, current, started)
         lastOutcome = outcome
         lastAttemptAtMillis = clock()
@@ -197,17 +306,23 @@ class AuthFlow(
 
         // 步骤 2：查绑定关系
         val boundLabel = wifiMap.labelFor(current)
-            ?: return AuthFlowOutcome.Skipped(AuthSkipReason.SSID_NOT_BOUND, current, targetSsid)
+            ?: run {
+                log("网络检测：当前 WiFi「$current」没有匹配到任何已存储的网络（未绑定账号）→ 跳过登录")
+                return AuthFlowOutcome.Skipped(AuthSkipReason.SSID_NOT_BOUND, current, targetSsid)
+            }
+        log("网络检测：当前 WiFi「$current」与已存储网络**匹配**（账号 label=「$boundLabel」）")
 
         // 步骤 3（B8 核心）：目标 SSID 与当前 SSID 必须一致，否则零请求返回
         val effectiveTarget = if (targetSsid.isNullOrBlank()) current else targetSsid.trim()
         if (current.trim() != effectiveTarget) {
+            log("网络检测：当前 WiFi「$current」与目标 WiFi「$effectiveTarget」**不匹配** → 跳过登录")
             return AuthFlowOutcome.Skipped(AuthSkipReason.SSID_MISMATCH, current, effectiveTarget)
         }
 
         // 步骤 4：取凭据（缺失 → 结构化失败，仍然不发请求）
         val credential = credentials.find(boundLabel) ?: credentials.selected()
         if (credential == null) {
+            log("配置检查：WiFi「$current」绑定到账号「$boundLabel」，但未找到该账号凭据 → 未发起认证")
             return AuthFlowOutcome.Done(
                 AuthResult(
                     ok = false,
@@ -221,7 +336,43 @@ class AuthFlow(
             )
         }
 
-        // 步骤 5：调认证客户端（唯一发请求的地方）
+        // 步骤 5（logfix1 任务 C 段：第 ②③ 段判断）：
+        //   ② 验证该网络是否为 SRun 认证系统；③ 检查是否已登录。**一次探测同时得到两个答案**。
+        //   结论只有四种（见 ProbeOutcome / artifacts/logfix1/fix-report.md 的判定表）：
+        //     NOT_SRUN → 跳过；ALREADY_ONLINE → 跳过；NOT_LOGGED_IN → 继续第 ④ 段；INDETERMINATE → 跳过并重试。
+        // 代价：本步是**新增的一次 HTTP GET**（get_challenge）。它只在「已绑定 + 已勾选 + SSID 匹配」时才发生，
+        // 每次运行最多一次；不确定时不再重复探测，而是交给 ProbeRetryCoordinator 的 5 分钟通道。
+        if (probeGate !== ProbePort.inactive) {
+            val probe = probeGate.probe(portalProvider.portal(), credential.username, "")
+            val safeUser = AppLog.maskAccount(credential.username)
+            when (probe.outcome) {
+                ProbeOutcome.NOT_SRUN -> {
+                    probeAttempts?.reset(current)
+                    log("网络检测：WiFi「$current」判定为**非 SRun 系统**（依据：${probe.evidence}）→ 跳过登录")
+                    return AuthFlowOutcome.Skipped(AuthSkipReason.NOT_SRUN, current, effectiveTarget)
+                }
+                ProbeOutcome.ALREADY_ONLINE -> {
+                    probeAttempts?.reset(current)
+                    log("网络检测：WiFi「$current」是 SRun 系统且**已登录**（依据：${probe.evidence}）→ 跳过登录")
+                    return AuthFlowOutcome.Skipped(AuthSkipReason.ALREADY_ONLINE, current, effectiveTarget)
+                }
+                ProbeOutcome.INDETERMINATE -> {
+                    val st = probeAttempts?.record(current, clock(), probe.outcome)
+                    lastProbe = st
+                    log(
+                        "网络检测：WiFi「$current」探测**不确定**（依据：${probe.evidence}）" +
+                            "→ 本次不登录（探测第 ${st?.attempts ?: 1} 次；${ProbeRetryPolicy.describe()}）"
+                    )
+                    return AuthFlowOutcome.Skipped(AuthSkipReason.PROBE_UNCERTAIN, current, effectiveTarget)
+                }
+                ProbeOutcome.NOT_LOGGED_IN -> {
+                    probeAttempts?.reset(current)
+                    log("网络检测：WiFi「$current」是 SRun 系统且**未登录**（依据：${probe.evidence}）→ 执行登录（账号 $safeUser）")
+                }
+            }
+        }
+
+        // 步骤 6：调认证客户端（唯一发认证请求的地方）
         val request = AuthRequest(
             username = credential.username,
             password = credential.password,
@@ -229,7 +380,29 @@ class AuthFlow(
             portal = portalProvider.portal(),
             ipOverride = ""           // 空 = 由认证客户端按 client_ip → 本机探测 的顺序决定（绝不硬编码）
         )
-        return AuthFlowOutcome.Done(transport.execute(request), current, effectiveTarget, boundLabel)
+        log("登录执行：开始认证（目标 WiFi「$current」，账号 ${AppLog.maskAccount(credential.username)}，门户 ${portalProvider.portal()}）")
+        val result = transport.execute(request)
+        if (result.ok) {
+            log("登录执行：成功（服务端 error=${SrunProtocol.OK}，阶段 ${result.stage}，耗时 ${result.elapsedMs}ms，ip 来源 ${result.ipSource}）")
+        } else {
+            log(
+                "登录执行：失败（${result.failure?.displayName ?: "未分类"}，code=${result.code}，" +
+                    "阶段 ${result.stage}，耗时 ${result.elapsedMs}ms）：${result.msg}"
+            )
+        }
+        return AuthFlowOutcome.Done(result, current, effectiveTarget, boundLabel)
+    }
+
+    /**
+     * 写一行应用内日志（logfix1 任务 B 段）。
+     *
+     * 硬性要求：**日志失败绝不影响主流程** —— 本方法把写入包在 runCatching 里，
+     * 且 [AppLog.record] 自身也吞异常；logContext 为 null（离线核对）时直接跳过。
+     * 另外**绝不传密码**：本方法只接受已经由调用点脱敏过的文本。
+     */
+    private fun log(line: String) {
+        val ctx = logContext ?: return
+        runCatching { AppLog.record(top.ytu.srunautologin.platform.SrunStorage.keyValueStore(ctx), line) }
     }
 
     companion object {
@@ -267,9 +440,12 @@ class CoreWifiSnapshotPort(private val core: WifiSnapshotCore) : WifiSnapshotPor
     override fun currentSsid(): String? = core.currentSsid()
 }
 
-/**
- * 认证客户端工厂接口：让「立即登录」与后台调度复用同一套装配，
+/** 认证客户端工厂接口：让「立即登录」与后台调度复用同一套装配，
  * 同时保持 flow 模块对 auth 模块实现的弱耦合（测试可注入假 transport）。
+ *
+ * 【logfix1 任务 C 段】`create` 保持**无参签名不变**（既有真机装配点与离线核对快照的 ABI 不受影响）；
+ * 探测端口不经过本接口，而是直接装配给 [AuthFlow.probeGate]（见真机装配点
+ * `AndroidAuthRunEnv.buildRun` 与 `MainActivity.buildAuthFlow`）。
  */
 interface AuthTransportFactory {
     fun create(): AuthTransport

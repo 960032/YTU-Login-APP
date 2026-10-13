@@ -2,6 +2,8 @@ package top.ytu.srunautologin.work
 
 import top.ytu.srunautologin.flow.AuthFlow
 import top.ytu.srunautologin.flow.AuthFlowOutcome
+import top.ytu.srunautologin.flow.AuthSkipReason
+import top.ytu.srunautologin.log.AppLog
 
 /**
  * 一次后台运行的结果（纯数据）。
@@ -46,6 +48,23 @@ class AuthWorkCoordinator(
     private val clock: () -> Long = { System.currentTimeMillis() },
     private val minRetryIntervalSeconds: Long = 0L
 ) {
+
+    /**
+     * 【logfix1 任务 B 段】日志写入缝（真机 = `AppLog.record(kv, line)`；null = 不写应用内日志，
+     * 既有离线核对的老调用点行为不变）。
+     *
+     * **为什么是可变属性而不是构造参数**（与 [AuthFlow] 同一教训，实测证据见 artifacts/logfix1/verify-proof.txt）：
+     * 既有离线核对快照按「6 个参数 + 1 个默认掩码」的合成默认构造直接调用本类：
+     * `(AuthFlow, AuthStatusStore, BackoffScheduler, TriggerKind, Function0<Long>, long, int, DefaultConstructorMarker)`。
+     * 在构造参数列表里新增一项后，合成默认构造变成 9 个参数 → 快照侧抛 NoSuchMethodError。
+     * 因此构造签名**逐字冻结**，日志缝在真机装配点构造完成后注入。
+     *
+     * **为什么是 `(String) -> Unit` 而不是 `android.content.Context`**：本文件在既有离线核对里是
+     * 「纯逻辑文件」（W42 断言：纯逻辑文件不得 `import android.`）。把签名写成 Context 会把 Android
+     * 类型传染进 work 层的纯逻辑文件；写成函数类型则由 Android 边界层（AuthWorkWiring / AuthJobService）
+     * 在构造后注入 `{ line -> AppLog.record(kv, line) }`，本文件保持**零 android import**。
+     */
+    var log: ((String) -> Unit)? = null
 
     private val policy: RetryPolicy get() = scheduler.policy
 
@@ -199,7 +218,7 @@ class AuthWorkCoordinator(
         store.saveAttemptState(newState)
         store.saveResult(text = statusLine, code = code, ok = authOk, atMillis = finish)
 
-        return AuthRunResult(
+        val result = AuthRunResult(
             outcome = runOutcome,
             code = code,
             message = message,
@@ -212,12 +231,51 @@ class AuthWorkCoordinator(
             ranFlow = true,
             statusLine = statusLine
         )
+        logResult(result)
+        return result
     }
 
     /** 成功 / 用户改配置后清零退避计数（由调度层在需要时调用）。 */
     fun resetBackoff() {
         val prev = store.loadAttemptState()
         store.clearAttempts(seq = prev.seq)
+    }
+
+    /**
+     * 【logfix1 任务 B 段】把一次后台运行的结果写进应用内日志（与状态区同源）。
+     *
+     * 覆盖的事件语义（用户要求「记录本应用执行和用户输入的所有操作」）：
+     *  - 调度触发（trigger）/ 退避等待 / 退避预算耗尽（放弃）/ 未配置账号 / 探测不确定；
+     *  - 登录成功（服务端 code）/ 登录失败（code + 失败分类）；
+     *  - 重试（第几次、延迟多少秒）。
+     *
+     * 隐私：账户名一律经 [AppLog.maskAccount]（只留前 3 位）；本方法**不接触密码**。
+     * 失败安全：整段 runCatching —— 日志异常绝不影响认证结果。
+     */
+    private fun logResult(r: AuthRunResult) {
+        val sink = log ?: return
+        runCatching {
+            val head = "[${r.trigger.wireName}]"
+            val line = when (r.outcome) {
+                RunOutcome.SUCCESS -> "$head 登录成功：${r.message}（code=${r.code}）"
+                RunOutcome.RETRY_SCHEDULED -> "$head 登录失败：${r.message}（code=${r.code}）→ 重试第 ${r.attempt}/${policy.maxAttempts} 次，延迟 ${r.delaySeconds}s"
+                RunOutcome.GIVE_UP -> "$head 登录放弃：连续失败 ${r.attempt} 次（上限 ${policy.maxAttempts} 次），code=${r.code}，不再重试"
+                RunOutcome.SKIPPED_ZERO_REQUEST -> {
+                    if (r.code == AuthSkipReason.PROBE_UNCERTAIN.code) {
+                        val st = flow.lastProbeState
+                        val attempts = st?.attempts ?: 1
+                        "$head 探测不确定：${r.message}（探测第 $attempts 次）→ 本次未登录；" +
+                            "将按 5 分钟间隔重试，最多 2 次（共 3 次），全部不确定则记日志后不再尝试"
+                    } else {
+                        "$head 跳过（零请求）：${r.message}（code=${r.code}）"
+                    }
+                }
+                RunOutcome.WAITING -> "$head 等待：${r.message}（还需 ${r.delaySeconds}s）"
+                RunOutcome.NO_CREDENTIAL -> "$head 未配置账号：${r.message}"
+                RunOutcome.NO_PERMISSION -> "$head 权限缺失：${r.message}"
+            }
+            sink(line)
+        }
     }
 
     /** 本轮允许的最大尝试次数（供调度层与状态文本使用）。 */

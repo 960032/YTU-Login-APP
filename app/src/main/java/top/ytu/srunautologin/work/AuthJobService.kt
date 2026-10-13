@@ -30,6 +30,13 @@ class AuthJobService : JobService() {
         val periodic = jobId == AuthJobs.JOB_ID_PERIODIC
         val reason = jobIdName(jobId)
         AuthWorkWiring.progress(this, "onStartJob: jobId=$jobId reason=$reason")
+        // 【logfix1 任务 B 段】调度埋点：JobScheduler 真正唤起了后台任务
+        runCatching {
+            top.ytu.srunautologin.log.AppLog.record(
+                top.ytu.srunautologin.platform.SrunStorage.keyValueStore(this),
+                "调度：JobScheduler 触发后台任务（jobId=$jobId，来源 $reason，periodic=$periodic）"
+            )
+        }
 
         // 【A5：与早上例程不冲突 —— 共享计数 + 让路】
         // 周期兜底（15 分钟）与闹钟链路（6:00 起每 10 分钟）可能撞在同一时刻。
@@ -63,6 +70,15 @@ class AuthJobService : JobService() {
                         "attempt=${result.attempt}/${AuthWorkWiring.maxAttempts(this)} " +
                         "delay=${result.delaySeconds}s"
                 )
+                // 【logfix1 任务 B 段】调度埋点：后台任务收尾（成功/失败/放弃/重试在 AuthWorkCoordinator
+                // 的日志里已有明细，这里只记「本次任务结束 + 是否要系统重投」）
+                runCatching {
+                    top.ytu.srunautologin.log.AppLog.record(
+                        top.ytu.srunautologin.platform.SrunStorage.keyValueStore(this),
+                        "调度：后台任务结束（trigger=${result.trigger.wireName}，outcome=${result.outcome.wireName}，" +
+                            "code=${result.code}，delay=${result.delaySeconds}s）"
+                    )
+                }
                 when (result.outcome) {
                     // 收工：不再排期（等下一次触发/周期保底）
                     RunOutcome.SUCCESS, RunOutcome.GIVE_UP, RunOutcome.NO_CREDENTIAL, RunOutcome.NO_PERMISSION -> false

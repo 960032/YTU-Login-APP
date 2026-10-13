@@ -270,5 +270,16 @@
             android:layout_height="wrap_content"
             android:text="@string/btn_save_portal" />
 
+        <!-- ================= 元素 13：日志（logfix1 任务 D 段）=================
+             用户要求：在界面**最下侧**添加「日志」按钮，点击后打开日志窗口（记录本应用执行与用户输入的所有操作）。
+             因此本按钮是布局里**最后一个**控件（在所有既有元素之下）。弹窗实现见 MainActivity.showLogDialog()：
+             可滚动 + 复制全部 + 清空，零第三方依赖（android.app.AlertDialog + ScrollView + TextView）。 -->
+        <Button
+            android:id="@+id/btn_log"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="18dp"
+            android:text="@string/btn_log" />
+
     </LinearLayout>
 </ScrollView>

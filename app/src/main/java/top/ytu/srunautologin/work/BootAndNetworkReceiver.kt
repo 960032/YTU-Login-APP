@@ -78,6 +78,15 @@ class NetworkChangeReceiver : BroadcastReceiver() {
         val ctx = context?.applicationContext ?: return
         if (intent?.action != ConnectivityManager.CONNECTIVITY_ACTION) return
 
+        // 【logfix1 任务 B 段·网络变化埋点】用户要求记录「检测网络是否符合登陆要求」全过程，
+        // 起点就是「检测到网络变化」。这条日志与既有 progress 并行写，互不替代。
+        runCatching {
+            top.ytu.srunautologin.log.AppLog.record(
+                top.ytu.srunautologin.platform.SrunStorage.keyValueStore(ctx),
+                "调度：检测到网络变化（CONNECTIVITY_ACTION）"
+            )
+        }
+
         val cm = ctx.getSystemService(Context.CONNECTIVITY_SERVICE) as? ConnectivityManager ?: return
         if (!NetworkWatcher.isOnWifi(cm)) {
             AuthWorkWiring.progress(ctx, "trigger: CONNECTIVITY_ACTION（非 WiFi，忽略）")

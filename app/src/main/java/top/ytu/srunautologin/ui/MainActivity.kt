@@ -2,11 +2,15 @@ package top.ytu.srunautologin.ui
 
 import android.app.Activity
 import android.app.AlertDialog
+import android.content.ClipData
+import android.content.ClipboardManager
 import android.content.ComponentName
 import android.content.pm.PackageManager
+import android.graphics.Color
 import android.os.Build
 import android.os.Bundle
 import android.util.Log
+import android.view.Gravity
 import android.view.View
 import android.view.WindowInsets
 import android.widget.AdapterView
@@ -20,13 +24,17 @@ import android.widget.Spinner
 import android.widget.TextView
 import android.widget.Toast
 import top.ytu.srunautologin.R
+import top.ytu.srunautologin.auth.HttpUrlConnectionEngine
 import top.ytu.srunautologin.auth.SrunAuthClient
 import top.ytu.srunautologin.flow.AuthFlow
 import top.ytu.srunautologin.flow.AuthFlowOutcome
 import top.ytu.srunautologin.flow.CoreWifiSnapshotPort
 import top.ytu.srunautologin.flow.MapWifiAccountLookup
+import top.ytu.srunautologin.flow.ProbeAttemptStore
 import top.ytu.srunautologin.flow.RepositoryCredentialLookup
+import top.ytu.srunautologin.flow.SrunPortalProbe
 import top.ytu.srunautologin.flow.StoredPortalProvider
+import top.ytu.srunautologin.log.AppLog
 import top.ytu.srunautologin.net.WifiPermissionPolicy
 import top.ytu.srunautologin.net.WifiPermissionRequestOutcome
 import top.ytu.srunautologin.net.WifiPermissionState
@@ -82,6 +90,8 @@ class MainActivity : Activity() {
     private lateinit var textStatus: TextView
     private lateinit var btnLoginNow: Button
     private lateinit var editNewSsid: EditText
+    // 【logfix1 任务 D 段】最下侧的「日志」按钮（弹窗标题「运行日志」）
+    private lateinit var btnLog: Button
     private lateinit var editPortal: EditText
     private lateinit var btnSavePortal: Button
 
@@ -203,6 +213,8 @@ class MainActivity : Activity() {
         editNewSsid = findViewById(R.id.edit_new_ssid)
         editPortal = findViewById(R.id.edit_portal)
         btnSavePortal = findViewById(R.id.btn_save_portal)
+        // 【logfix1 任务 D 段】最下侧的「日志」按钮（布局里的最后一个控件）
+        btnLog = findViewById(R.id.btn_log)
 
         // insets-fix1（A）：把系统栏 insets 作为 padding 应用到滚动根上。
         // 放在 findViewById 之后、try 之外，与上面 16 行 findViewById 同一性质的「纯绑定」动作
@@ -420,8 +432,40 @@ class MainActivity : Activity() {
             // 取值时机推迟到 AuthFlow.run() 真正调用 portal() 时。以工厂函数（而非 lambda 对象）持有
             // Activity，避免把 this 捕获进闭包（否则会有 Activity 泄漏风险）。
             portalProvider = StoredPortalProvider(AuthFlowFactory.portalStore(this))
+        // 【logfix1 任务 C/B 段：构造后注入】构造签名逐字冻结（既有离线核对快照按合成默认构造调用），
+        // 探测端口与日志 Context 在构造完成后装配：
+        //   ② 验证该网络是否为 SRun 认证系统；③ 检查是否已登录 —— 一次 get_challenge 探测同时得到两个答案。
+        // **线程**：本链路只在「立即登录」的后台线程（startLoginNow 的 Thread）上运行 ——
+        // 主线程网络会抛 NetworkOnMainThreadException（AGENTS.md §7 已记录该崩溃）。
+        ).withProbeAndLog(
+            probeGate = SrunPortalProbe(HttpUrlConnectionEngine()),
+            probeAttempts = ProbeAttemptStore(portalStore),
+            logContext = this
         )
     }
+
+    /**
+     * 【logfix1 任务 B 段】写一行应用内日志（用户操作 / 应用执行）。
+     *
+     * 三条硬性要求：
+     *  1. **绝不传密码**：本方法只接受调用点已经脱敏的文本；账户一律经 `AppLog.maskAccount`（前 3 位 + …）。
+     *  2. **绝不影响主流程**：整段 runCatching（[AppLog.record] 内部也吞异常）——日志失败不弹错、不中断点击处理。
+     *  3. **不触碰构造期**：本方法是**普通成员函数**（不是属性初始化器），所有 Android API 调用都发生在
+     *     用户操作/界面刷新时，满足 crashfix2 的「初始化器不得触碰 Context」硬约束。
+     */
+    private fun appLog(event: String) {
+        try {
+            AppLog.record(SrunStorage.keyValueStore(this), event)
+        } catch (t: Throwable) {
+            // 日志失败必须被吞掉：它是辅助功能，绝不能把界面/认证带崩
+        }
+    }
+
+    /** 日志窗口一次最多渲染的条数（1000 条一次性渲染在低端机上会卡；复制全部仍取全量）。 */
+    private val LOG_RENDER_LIMIT = 400
+
+    /** 日志窗口内滚动区的高度上限（dp）：超过即滚动，弹窗不会撑出屏幕。 */
+    private val LOG_DIALOG_MAX_HEIGHT_DP = 360
 
     private fun buildViewModel() {
         // portalStore 在此首次访问 → 触发 by lazy 求值；此时 onCreate 已执行，Activity 已 attach
@@ -503,6 +547,8 @@ class MainActivity : Activity() {
         // 元素 3：登录方式二选一
         spinnerCarrier.onItemSelectedListener = object : AdapterView.OnItemSelectedListener {
             override fun onItemSelected(parent: AdapterView<*>?, view: View?, position: Int, id: Long) {
+            // 【logfix1 任务 B 段】用户输入：登录方式（运营商）选择
+            appLog("用户输入：登录方式选择 position=$position")
                 viewModel.selectCarrier(position)
                 editLabel.setText(viewModel.state.labelInput)
                 render()
@@ -533,12 +579,15 @@ class MainActivity : Activity() {
         editPortal.setText(viewModel.state.portalInput)
         editPortal.addTextChangedListener(SimpleTextWatcher { viewModel.setPortal(it) })
         btnSavePortal.setOnClickListener {
-            when (val outcome = viewModel.savePortal()) {
-                is PortalSaveOutcome.Invalid -> toast(outcome.message)
+            val portalOutcome = viewModel.savePortal()
+            if (portalOutcome is PortalSaveOutcome.Invalid) appLog("用户操作：保存门户地址失败（${portalOutcome.message}）")
+            when (portalOutcome) {
+                is PortalSaveOutcome.Invalid -> toast(portalOutcome.message)
                 is PortalSaveOutcome.Saved -> {
                     // 规范化后的地址回填输入框（避免与已保存值不一致）
-                    if (editPortal.text.toString() != outcome.portal) editPortal.setText(outcome.portal)
-                    toast(getString(R.string.save_portal_done, outcome.portal))
+                    if (editPortal.text.toString() != portalOutcome.portal) editPortal.setText(portalOutcome.portal)
+                    toast(getString(R.string.save_portal_done, portalOutcome.portal))
+                    appLog("用户操作：保存门户地址成功（${portalOutcome.portal}）")
                 }
             }
             render()
@@ -547,7 +596,10 @@ class MainActivity : Activity() {
         // 元素 7：保存（写入已冻结的存储）
         btnSave.setOnClickListener {
             when (val outcome = viewModel.save()) {
-                is SaveOutcome.Invalid -> toast(outcome.message)
+                is SaveOutcome.Invalid -> {
+                    toast(outcome.message)
+                    appLog("用户操作：保存账号/绑定失败（校验未通过：${outcome.message}）")
+                }
                 is SaveOutcome.Saved -> {
                     // 先清掉上一次的失败标记：本次成功就显示成功，不被旧错误遮住。
                     savePersistError = null
@@ -576,8 +628,10 @@ class MainActivity : Activity() {
                     }
                     if (stored.isFailure) {
                         saveFailed(stored.exceptionOrNull()!!)
+                        appLog("用户操作：保存账号/绑定失败（备注「${outcome.plan.label}」，网络「${outcome.plan.targetSsid}」，账号 ${AppLog.maskAccount(outcome.plan.credential.username)}）")
                     } else {
                         toast(getString(R.string.save_done, outcome.plan.label, outcome.plan.targetSsid))
+                        appLog("用户操作：保存账号/绑定成功（备注「${outcome.plan.label}」，网络「${outcome.plan.targetSsid}」，账号 ${AppLog.maskAccount(outcome.plan.credential.username)}）")
                     }
                 }
             }
@@ -598,6 +652,133 @@ class MainActivity : Activity() {
         // 【uifix2 任务 A】点击后**不在主线程**做网络：整条链路（本机 IP 探测 + get_challenge + srun_portal
         // 两次 HTTP）交给后台线程，主线程只负责开始前与结束后的界面读写。详见 startLoginNow() 的 KDoc。
         btnLoginNow.setOnClickListener { startLoginNow() }
+
+        // 【logfix1 任务 D 段】元素 13：最下侧的「日志」按钮 → 打开日志窗口（可滚动 + 复制全部 + 清空）
+        btnLog.setOnClickListener { showLogDialog() }
+        // 【logfix1 任务 B 段】应用启动（配置界面 onCreate 成功走完）
+        appLog("应用执行：配置界面已启动（元素 13「日志」按钮可用）")
+    }
+
+    /**
+     * 【logfix1 任务 D 段】日志窗口（用户要求：点「日志」按钮打开，记录本应用执行与用户输入的所有操作）。
+     *
+     * 零第三方依赖：`android.app.AlertDialog` + `ScrollView` + `TextView`（全部框架原生 View）。
+     *
+     * 【刷新方式（acctfix1 已验证的修法，见 artifacts/acctfix1/fix-report.md）】
+     * `AlertDialog.setView()` 在**已显示**之后不会触发窗口重新测量/布局 → 内容变化或清空后屏幕仍是旧内容。
+     * 因此这里**每次刷新都重建一个全新的对话框并 show()**，先 `dismiss()` 旧的（同一时刻至多一个存活）。
+     *
+     * 三个动作：
+     *  - **可滚动**：ScrollView（固定高度上限，日志越长越需要滚动）；
+     *  - **复制全量**：ClipboardManager（`Context.CLIPBOARD_SERVICE`）→ Toast 反馈条数（复制的是**全量**，
+     *    不只是屏幕上渲染的那些）；
+     *  - **清空**：带确认框 → `AppLog.clear` → 重建弹窗显示「暂无日志」。
+     *
+     * 渲染上限 [LOG_RENDER_LIMIT]：1000 条一次性塞进一个 TextView 在低端机上会明显卡顿（测量/布局都在主线程），
+     * 因此界面只渲染**最近 400 条**并在标题行注明总数与取全量的方式；`复制全部`仍复制 1000 条全量。
+     */
+    private fun showLogDialog() {
+        try {
+            var active: AlertDialog? = null
+            lateinit var refresh: () -> Unit
+
+            // 先关旧、再开新：保证「内容变化后一定重新测量/布局」（不依赖 setView 刷新）
+            fun showDialog(next: AlertDialog) {
+                val old = active
+                active = next
+                old?.dismiss()
+                next.show()
+            }
+
+            fun buildDialog(lines: List<String>): AlertDialog {
+                val shown = if (lines.size > LOG_RENDER_LIMIT) lines.subList(lines.size - LOG_RENDER_LIMIT, lines.size) else lines
+                val column = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL }
+                val header = TextView(this).apply {
+                    text = if (lines.size > LOG_RENDER_LIMIT) {
+                        getString(R.string.log_showing_recent, shown.size, lines.size)
+                    } else {
+                        getString(R.string.log_count, lines.size)
+                    }
+                    setTextColor(LINK_BLUE)
+                    setPadding(16, 12, 16, 4)
+                }
+                column.addView(header)
+
+                val body = TextView(this).apply {
+                    text = if (shown.isEmpty()) getString(R.string.log_empty) else shown.joinToString("\n")
+                    textSize = 11f
+                    typeface = android.graphics.Typeface.MONOSPACE
+                    setTextColor(Color.DKGRAY)
+                    setPadding(16, 4, 16, 12)
+                    setTextIsSelectable(true)
+                    gravity = Gravity.START
+                }
+                // 可滚动：ScrollView 包 TextView，并给定最大高度（超出即滚动，不把弹窗撑出屏幕）
+                val scroll = ScrollView(this).apply {
+                    addView(body)
+                    setPadding(0, 0, 0, 0)
+                }
+                column.addView(scroll, LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT,
+                    (LOG_DIALOG_MAX_HEIGHT_DP * resources.displayMetrics.density).toInt()
+                ))
+
+                return AlertDialog.Builder(this)
+                    .setTitle(R.string.log_dialog_title)
+                    .setView(column)
+                    .setPositiveButton(R.string.log_copy_all) { _, _ -> copyAllLogs() }
+                    .setNeutralButton(R.string.log_clear) { _, _ -> confirmClearLogs { refresh() } }
+                    .setNegativeButton(R.string.dialog_cancel, null)
+                    .create()
+            }
+
+            refresh = {
+                val all = runCatching { AppLog.list(portalStore) }.getOrDefault(emptyList())
+                showDialog(buildDialog(all))
+            }
+            appLog("用户操作：打开日志窗口")
+            refresh()
+        } catch (t: Throwable) {
+            // 打开日志窗口失败也绝不能崩：给出可见提示
+            Log.e(TAG, "打开日志窗口失败", t)
+            toast("打开日志失败：" + t.javaClass.simpleName)
+        }
+    }
+
+    /** 复制**全量**日志到剪贴板（ClipboardManager，`Context.CLIPBOARD_SERVICE`）。 */
+    private fun copyAllLogs() {
+        try {
+            val all = runCatching { AppLog.list(portalStore) }.getOrDefault(emptyList())
+            if (all.isEmpty()) {
+                toast(getString(R.string.log_copy_empty))
+                return
+            }
+            val cm = getSystemService(CLIPBOARD_SERVICE) as? ClipboardManager
+            if (cm == null) {
+                toast(getString(R.string.log_copy_empty))
+                return
+            }
+            cm.setPrimaryClip(ClipData.newPlainText(getString(R.string.log_dialog_title), all.joinToString("\n")))
+            appLog("用户操作：复制全部日志（${all.size} 条）")
+            toast(getString(R.string.log_copied, all.size))
+        } catch (t: Throwable) {
+            Log.e(TAG, "复制日志失败", t)
+            toast("复制日志失败：" + t.javaClass.simpleName)
+        }
+    }
+
+    /** 清空日志（带确认框；确认后清空并刷新弹窗内容）。 */
+    private fun confirmClearLogs(afterClear: () -> Unit) {
+        AlertDialog.Builder(this)
+            .setMessage(R.string.log_clear_confirm)
+            .setPositiveButton(android.R.string.ok) { _, _ ->
+                val n = runCatching { AppLog.list(portalStore).size }.getOrDefault(0)
+                runCatching { AppLog.clear(portalStore) }
+                appLog("用户操作：清空日志（原 $n 条）")
+                afterClear()
+            }
+            .setNegativeButton(R.string.dialog_cancel, null)
+            .show()
     }
 
     /**
@@ -635,6 +816,7 @@ class MainActivity : Activity() {
         textStatus.text = getString(R.string.login_running)
         applyStateColor(textStatus, COLOR_STATUS_FAIL)
         scrollTo(textStatus)
+        appLog("用户操作：点击「立即登录」")
 
         val submitted = runCatching {
             val worker = Thread {
@@ -670,6 +852,16 @@ class MainActivity : Activity() {
     private fun finishLogin(failure: Throwable?) {
         try {
             if (failure == null) {
+                val st = viewModel.state
+                val r = st.lastResult
+                appLog(
+                    if (st.statusOk) {
+                        "用户操作：「立即登录」结果=成功（${st.statusText.take(120)}）"
+                    } else {
+                        "用户操作：「立即登录」结果=未登录（code=${r?.code ?: "-"}，" +
+                            "失败分类=${r?.failure?.displayName ?: "-"}）：${st.statusText.take(120)}"
+                    }
+                )
                 render()
                 scrollTo(textStatus)
             } else {
@@ -693,6 +885,8 @@ class MainActivity : Activity() {
         val reason = e.message?.takeIf { it.isNotBlank() } ?: "无 message"
         val text = getString(R.string.login_failed_prefix) + e.javaClass.simpleName + "：" + reason
         Log.e(TAG, text, e)
+        // 【logfix1 任务 B 段】失败原因进日志：只记类名 + message（不记栈、不记凭据）
+        appLog("用户操作：「立即登录」异常（${e.javaClass.simpleName}）：$reason")
         textStatus.text = text
         applyStateColor(textStatus, COLOR_STATUS_FAIL)
         toast(text)
@@ -713,6 +907,7 @@ class MainActivity : Activity() {
      * 全过程零第三方依赖：`android.app.AlertDialog`（框架原生）已在文件头 import。
      */
     private fun chooseWifiFromDialog() {
+        appLog("用户操作：打开 WiFi 选择弹窗")
         // ① 刷新：先重新读系统检测到的 WiFi（内部 = viewModel.refreshSsidList() + render()）
         refreshSsidList()
         val s = viewModel.state
@@ -736,6 +931,7 @@ class MainActivity : Activity() {
             .setTitle(R.string.dialog_wifi_title)
             .setSingleChoiceItems(items, checked) { dialog, which ->
                 // ③ 选择生效：写回 ViewModel —— 与内嵌列表点击走的是**同一个** selectSsid，行为完全一致
+                appLog("用户操作：WiFi 选择弹窗中选择「${items[which]}」")
                 viewModel.selectSsid(items[which])
                 dialog.dismiss()
                 render()
@@ -777,6 +973,7 @@ class MainActivity : Activity() {
      */
     private fun chooseAccountFromDialog() {
         val store = SrunStorage.accountStore(this)
+        appLog("用户操作：打开账号选择弹窗")
 
         // 名单弹窗 / 空列表提示弹窗 的当前实例（同一时刻至多一个）。
         // 注意：Kotlin 的**局部函数**不能前向引用。这里的依赖是环状的：
@@ -867,6 +1064,10 @@ class MainActivity : Activity() {
                 false
             }
             if (!ok) checkbox.isChecked = account.enabled
+            appLog(
+                "用户操作：${if (checked) "勾选" else "取消勾选"}账号「${account.label}」（网络「${account.ssid}」）" +
+                    if (ok) "" else "——写入失败，已回滚显示"
+            )
             afterChange()          // 立即持久化 + 立即刷新计数
         }
         row.addView(checkbox)
@@ -907,6 +1108,7 @@ class MainActivity : Activity() {
                     false
                 }
                 if (!deleted) return@setPositiveButton
+                appLog("用户操作：删除账号「${account.label}」（网络「${account.ssid}」）")
                 // 删除后处理「当前选中」的一致性：v2 侧已在 AccountStore.delete 里清掉悬空的
                 // selected_label_v1；这里把 v1 的「当前选中」也清掉，避免它继续指向已删除的记录。
                 runCatching {
@@ -957,6 +1159,7 @@ class MainActivity : Activity() {
      * （lambda 内滚动会被 AlertDialog 的窗口遮挡，先关窗再滚更可靠）。顺序、参数、文案一概未动。
      */
     private fun requestPermissionWithRationale() {
+        appLog("用户操作：点击申请 WiFi/位置信息 权限（先展示用途说明）")
         // 第 1 步：展示说明文案
         AlertDialog.Builder(this)
             .setTitle(R.string.permission_explain_title)
@@ -968,8 +1171,10 @@ class MainActivity : Activity() {
                 if (required.isEmpty()) {
                     // 当前系统版本无需运行时权限（API < 27）：直接按授予处理，状态保持一致
                     viewModel.onPermissionResult(true)
+                    appLog("用户操作：同意权限说明（当前系统无需运行时权限，直接按已授予处理）")
                 } else {
                     // 第 3 步：系统权限弹窗（结果回到 onRequestPermissionsResult）
+                    appLog("用户操作：同意权限说明 → 弹出系统权限对话框（${required.joinToString(",")}）")
                     permissionPort.requestPermissions()
                 }
                 render()
@@ -979,6 +1184,7 @@ class MainActivity : Activity() {
                 // 说明阶段被拒：等同拒绝 → 第 4 步 onRequestResult(DENIED) → 降级为只检测当前 WiFi
                 viewModel.beginPermissionRequest()
                 viewModel.onPermissionResult(false)
+                appLog("用户操作：拒绝权限说明（未授权,仅访问当前网络）")
                 render()
                 scrollTo(textPermissionState)
             }
@@ -1122,6 +1328,7 @@ class MainActivity : Activity() {
      */
     private fun toggleAutoLogin() {
         val enable = !MorningAuthRuntime.isEnabled(this)
+        appLog("用户操作：切换自动登录开关 → ${if (enable) "启用" else "停用"}")
         try {
             if (enable) {
                 MorningAuthRuntime.setEnabled(this, true)
@@ -1141,6 +1348,7 @@ class MainActivity : Activity() {
             }
         } catch (e: Throwable) {
             // 开关失败必须可见（不允许「点了没反应」）
+            appLog("用户操作：切换自动登录状态失败（${e.javaClass.simpleName}：${e.message ?: ""}）")
             toast("切换自动登录失败：" + e.javaClass.simpleName + "：" + (e.message ?: ""))
         }
         render()
@@ -1215,12 +1423,14 @@ class MainActivity : Activity() {
         // 不能静默——否则用户看不到常驻通知，却以为自动登录没工作。
         if (requestCode == REQ_NOTIFICATION) {
             val ok = grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+            appLog("用户操作：通知权限 ${if (ok) "已授予" else "被拒绝"}")
             if (!ok) toast(getString(R.string.morning_toast_notification_denied))
             return
         }
         if (requestCode != REQ_WIFI) return
         val granted = grantResults.isNotEmpty() &&
             grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+        appLog("用户操作：WiFi/位置信息 权限 ${if (granted) "已授予" else "被拒绝（降级为只检测当前 WiFi）"}")
         viewModel.onPermissionResult(granted)
         render()
         // 系统弹窗刚关闭，用户最需要看到的就是「到底给没给」→ 滚到权限状态行
@@ -1238,6 +1448,8 @@ class MainActivity : Activity() {
      * SecureStoreException（加密存储不可用）与 RuntimeException（其他存储异常）都在此收住，不再冒到主线程。
      */
     private fun saveFailed(e: Throwable) {
+        // 【logfix1 任务 B 段】保存失败必须进日志（用户可在「日志」窗口自查）
+        appLog("应用执行：保存失败（${e.javaClass.simpleName}：${e.message ?: "无 message"}）")
         val reason = when {
             e is SecureStoreException -> e.message ?: "加密存储不可用（Keystore 拒绝）"
             e is RuntimeException -> e.message ?: e.javaClass.simpleName

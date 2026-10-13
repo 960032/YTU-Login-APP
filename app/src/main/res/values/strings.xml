@@ -127,4 +127,19 @@
     <!-- acctfix1（真机反馈）：删除成功的专用提示；%1$s=备注名(label)、%2$s=网络名(ssid)。
          只含 label 与 ssid，绝不带账号/密码；与 save_done（「已保存：…」）是两条独立文案。 -->
     <string name="account_delete_done">已删除：%1$s ↔ %2$s</string>
+
+    <!-- ================= 元素 13：日志（logfix1 任务 D 段，用户原话「在界面最下侧添加『日志』按钮，
+         点击后打开日志窗口」）=================
+         按钮文案**逐字**「日志」；窗口标题建议值「运行日志」（派发指令给出的建议文案）。 -->
+    <string name="btn_log">日志</string>
+    <string name="log_dialog_title">运行日志</string>
+    <string name="log_empty">暂无日志</string>
+    <string name="log_copy_all">复制全部</string>
+    <string name="log_clear">清空</string>
+    <string name="log_clear_confirm">确认要清空全部日志吗?</string>
+    <string name="log_copied">已复制 %1$d 条日志到剪贴板</string>
+    <string name="log_copy_empty">暂无日志可复制</string>
+    <!-- 日志窗口只渲染最近 N 条（1000 条一次性渲染会让低端机卡顿），全量仍可通过「复制全部」取到 -->
+    <string name="log_showing_recent">当前显示最近 %1$d 条（共 %2$d 条，复制全部可取全量）</string>
+    <string name="log_count">共 %1$d 条</string>
 </resources>
