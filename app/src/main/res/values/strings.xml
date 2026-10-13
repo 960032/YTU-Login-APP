@@ -91,10 +91,48 @@
     <color name="portal_status_unsaved_text">#FFC62828</color>
     <color name="portal_status_saved_text">#FF2E7D32</color>
 
+    <!-- 元素 11（restoretoggle1）：自动登录状态文本的初始配色。
+         默认状态是「已启用」→ 初始值取绿（#FF2E7D32）；**运行时一律由代码按真实状态覆写**
+         （MainActivity.renderAutoLoginStatus → applyStateColor：启用=绿、停用=红 #FFC62828），
+         XML 里不写死单色 —— 这是用户明确要求「颜色由代码按状态设置」的落点。 -->
+    <color name="auto_login_status_enabled_text">#FF2E7D32</color>
+    <color name="auto_login_status_disabled_text">#FFC62828</color>
+
     <!-- removemorning1（用户要求「取消每天早上 6:00 的状态机和任务闹钟以及相应提示文本」）：
-         元素 11 的 14 条文案已**全部删除**（启停开关 / 开关状态行 / 自启动权限说明与跳转 /
-         自启动与通知提示 / 常驻通知的账号与 SSID 占位 / 通知标题与内容 / 通知渠道名与描述）。
-         删除前已逐条确认无任何引用残留（唯一的引用方 = 被删除的前台服务与元素 11 的控件）。 -->
+         元素 11 的 14 条文案当时**全部删除**（启停开关 / 开关状态行 / 自启动权限说明与跳转 /
+         自启动与通知提示 / 常驻通知的账号与 SSID 占位 / 通知标题与内容 / 通知渠道名与描述）。 -->
+
+    <!-- ================= 元素 11（restoretoggle1 恢复）：后台自动登录「控制开关 + 状态文本」 =================
+         用户逐字要求：
+           按钮文案      =「点击切换自动登录状态」
+           状态文本（在按钮下方）：启用 = 绿「自动登录已启用」、停用 = 红「自动登录已停用」
+         命名取舍：**不复用** morning1 的 morning_status_* 旧名（那两条文案里写着
+         「每天 06:00 起每 10 分钟尝试一次…07:00 截止」——06:00 定时已按用户要求删除，旧名带历史包袱、
+         文案也不再准确），改用语义准确的 auto_login_status_*。
+           · btn_toggle_auto_login 沿用 morning1 的**同名键**：用户要求的按钮文案与当时逐字相同
+             （「点击切换自动登录状态」），复用同名键可让任何按名查找的既有材料继续成立；
+           · 状态文本用新名 auto_login_status_*（文案与旧 morning_status_* 完全不同，见上）。 -->
+    <string name="btn_toggle_auto_login">点击切换自动登录状态</string>
+    <string name="auto_login_status_enabled">自动登录已启用</string>
+    <string name="auto_login_status_disabled">自动登录已停用</string>
+    <!-- 开关启用路径的两条提示（toast）：通知权限被拒时明确告知「后台照常、只是看不到通知」 -->
+    <string name="auto_login_toast_notification_denied">通知被禁用：自动登录仍会在后台执行，但看不到常驻通知</string>
+
+    <!-- ================= 常驻通知（restoretoggle1 恢复：前台服务，方案 A）=================
+         标题/内容/渠道名**逐字**沿用用户当时的要求（与 73f2e99^ 里的被删文案逐字一致，见 before-after.diff）：
+           · 标题：自动连接正在工作
+           · 内容：已保存登录账号:%1$s,将登录网络:%2$s（英文半角逗号；%1$s=备注名、%2$s=网络名）
+             —— **只放备注名与 SSID，绝不显示手机号/密码**（代码只取 label 与 ssid 两个字段）。
+           · 渠道名：自动连接
+         名字沿用 morning_notification_* / morning_channel_*：这些键在 73f2e99 删除前的取值与
+         用户本轮要求**逐字相同**，且离线核对材料按名引用它们（W43 会检查 manifest+服务）；
+         文案本身没有任何「06:00 / 早上」字样，因此不构成语义漂移。 -->
+    <string name="morning_notification_no_account">（尚未保存账号）</string>
+    <string name="morning_notification_no_ssid">（尚未绑定 WiFi）</string>
+    <string name="morning_notification_title">自动连接正在工作</string>
+    <string name="morning_notification_text">已保存登录账号:%1$s,将登录网络:%2$s</string>
+    <string name="morning_channel_name">自动连接</string>
+    <string name="morning_channel_desc">显示自动连接的工作状态</string>
 
     <!-- ================= 元素 12：账号选择（accountsel1 任务，用户原话）=================
          按钮「账号选择」→ 弹窗标题**逐字**「选择生效账号」；每行：勾选框 → 账户（偏左） → 网络（偏右） → 蓝色「删除」（最右）；

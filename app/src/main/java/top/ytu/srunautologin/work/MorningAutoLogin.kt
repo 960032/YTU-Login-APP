@@ -6,6 +6,8 @@ import top.ytu.srunautologin.storage.KeyValueStore
  * ============================ 早上自动登录：纯逻辑状态机（可离线核对）============================
  * 本文件**不引用任何 Android API**，只做时间/次数/决策这类可在 JVM 上判断的逻辑；
  * Android 侧（AlarmManager / 前台服务）在 [MorningAuthRuntime] 与 [MorningAuthForegroundService] 里。
+ * 【restoretoggle1】[MorningAuthForegroundService] 已按用户要求恢复（常驻通知，方案 A），
+ * 但 06:00 定时与闹钟**保持删除**；后台自动登录的总开关见 [AutoLoginSwitch]（默认启用）。
  *
  * 【需求口径（用户原话）】凌晨 5:30 上电，6:00 添加自启动任务与登录检测；
  *   若「已连接网络匹配保存的账号密码 且 未处于登录状态」则自动登录；

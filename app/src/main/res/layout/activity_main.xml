@@ -120,6 +120,31 @@
             android:layout_height="wrap_content"
             android:text="@string/btn_choose_account" />
 
+        <!-- ===== 元素 11（restoretoggle1 恢复）：后台自动登录的「控制开关 + 状态文本」 =====
+             位置即 removemorning1 删除前的原位置（保持「与「选择列表」相邻」的原有排布习惯）。
+             用户逐字要求：
+               · 按钮文案 =「点击切换自动登录状态」；
+               · 状态文本**在按钮下方（紧邻下一行）**：启用 = 绿色「自动登录已启用」、停用 = 红色「自动登录已停用」。
+             颜色**由代码按状态设置**（MainActivity.renderAutoLoginStatus → applyStateColor），
+             XML 这里只给初始值（默认启用 ⇒ 绿 + 「自动登录已启用」）。
+             默认启用 = AutoLoginSwitch.DEFAULT_ENABLED（新键 srun_auto_login_enabled_v1 首次缺省）；
+             恢复历史：removemorning1 曾整块删除本元素（当时只要求删「6:00 定时+闹钟」，控件被连带删除）。 -->
+        <Button
+            android:id="@+id/btn_toggle_auto_login"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="@string/btn_toggle_auto_login" />
+
+        <TextView
+            android:id="@+id/text_auto_login_status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="4dp"
+            android:text="@string/auto_login_status_enabled"
+            android:textColor="@color/auto_login_status_enabled_text"
+            android:textStyle="bold" />
+
         <LinearLayout
             android:id="@+id/ssid_list"
             android:layout_width="match_parent"
@@ -223,11 +248,11 @@
             android:textColor="@color/portal_status_unsaved_text"
             android:textStyle="bold" />
 
-        <!-- removemorning1（用户要求）：元素 11（早上自动登录：启停开关按钮 / 开关状态行 /
-             自启动权限说明文本 / 前往系统设置开启自启动按钮）**整块删除**——
-             不再有开机广播，自启动说明已无意义；也不再需要「点击切换自动登录状态」。
-             其余控件（账号、密码、登录方式、备注名、WiFi 选择、权限、保存、状态区、
-             立即登录、Portal、账号选择、日志）一律保留。 -->
+        <!-- restoretoggle1（用户要求「恢复控制开关」）：元素 11 的**开关按钮 + 状态文本**已在上方恢复；
+             「自启动权限说明文本 / 前往系统设置开启自启动」**按用户要求不恢复**——那属于开机广播场景，
+             用户明确接受「手机重启后最多等 15 分钟」，本次不恢复开机广播，因此自启动说明无意义。
+             其余控件（账号、密码、登录方式、备注名、WiFi 选择、权限、保存、状态区、立即登录、
+             Portal、账号选择、日志）一律保留。 -->
 
         <Button
             android:id="@+id/btn_save_portal"            android:layout_width="match_parent"

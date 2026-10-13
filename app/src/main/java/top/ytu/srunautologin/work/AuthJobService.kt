@@ -39,6 +39,22 @@ class AuthJobService : JobService() {
             )
         }
 
+        // restoretoggle1（用户要求）：闸门恢复 —— **停用时周期保底也不执行**（与网络变化通道同口径）。
+        // 位置在 onStartJob 内、两条调度埋点之后：停用就直接收工，不跑认证、不排重试。
+        AutoLoginSwitch.gateReason(
+            top.ytu.srunautologin.platform.SrunStorage.keyValueStore(this),
+            "AuthJobService.onStartJob（periodic=$periodic）"
+        )?.let { reason ->
+            AuthWorkWiring.progress(this, reason)
+            runCatching {
+                top.ytu.srunautologin.log.AppLog.record(
+                    top.ytu.srunautologin.platform.SrunStorage.keyValueStore(this),
+                    "调度：$reason"
+                )
+            }
+            return false
+        }
+
         // removemorning1：原「周期兜底为早上例程让路」的分支已删除 ——
         // 早上例程（06:00 首次 + 每 10 分钟重试、每天 7 次）已按用户要求整体取消，
         // 不再存在「刚跑过的早上尝试」需要让路；周期保底恢复为无条件的 15 分钟通道。

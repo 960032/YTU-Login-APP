@@ -332,10 +332,12 @@ object AuthWorkWiring {
     /** 开机/网络恢复后调用：注册周期保底并排一次尽快认证。 */
     fun onTrigger(context: Context, reason: String, initialDelayMillis: Long) {
         val appContext = context.applicationContext
-        // removemorning1：原「启停开关停用 → 直接返回（不排期）」的闸门已移除。
-        // 依据：开关的唯一界面入口（morning1 的启停按钮）按用户要求删除，且开关默认值是停用
-        //（MorningStateStore.DEFAULT_ENABLED = false）；保留闸门会让周期保底与网络变化这两条
-        // **必须保留**的通道在默认配置下全部失效，等于变相取消全部后台登录。
+        // restoretoggle1：闸门恢复（开关 UI 与「默认启用」已同时恢复）。
+        // 停用 ⇒ 直接返回：**不注册周期保底、不排认证**（开关语义：所有后台入口一律不生效）。
+        AutoLoginSwitch.gateReason(kv(appContext), "AuthWorkWiring.onTrigger($reason)")?.let {
+            progress(appContext, it)
+            return
+        }
         try {
             scheduler(appContext).ensurePeriodic()
             scheduler(appContext).enqueueAuthReplacing(initialDelayMillis, reason)

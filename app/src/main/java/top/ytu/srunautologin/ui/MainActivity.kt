@@ -34,6 +34,10 @@ import top.ytu.srunautologin.flow.ProbeAttemptStore
 import top.ytu.srunautologin.flow.RepositoryCredentialLookup
 import top.ytu.srunautologin.flow.SrunPortalProbe
 import top.ytu.srunautologin.flow.StoredPortalProvider
+import top.ytu.srunautologin.work.AutoLoginSwitch
+import top.ytu.srunautologin.work.MorningAuthForegroundService
+import top.ytu.srunautologin.work.startAutoLoginNotification
+import top.ytu.srunautologin.work.stopAutoLoginNotification
 import top.ytu.srunautologin.log.AppLog
 import top.ytu.srunautologin.net.WifiPermissionPolicy
 import top.ytu.srunautologin.net.WifiPermissionRequestOutcome
@@ -72,8 +76,11 @@ class MainActivity : Activity() {
     private lateinit var editPassword: EditText
     private lateinit var spinnerCarrier: Spinner
 
-    // removemorning1：元素 11 的三个控件字段（启停开关 / 早上状态行 / 自启动跳转按钮）已删除，
-    // 对应控件也从 res/layout/activity_main.xml 中移除。
+    // restoretoggle1（用户要求「恢复控制开关」）：元素 11 的两个控件**恢复**——
+    // 按钮（文案逐字「点击切换自动登录状态」）与它**下方**的状态文本（绿/红由代码按状态设置）。
+    // 「自启动权限说明与跳转」**不恢复**（那属于开机广播场景，用户未要求恢复）。
+    private lateinit var btnToggleAutoLogin: Button
+    private lateinit var textAutoLoginStatus: TextView
     private lateinit var editLabel: EditText
     private lateinit var btnUseCurrentWifi: Button
     private lateinit var ssidList: LinearLayout
@@ -193,8 +200,9 @@ class MainActivity : Activity() {
         editUsername = findViewById(R.id.edit_username)
         editPassword = findViewById(R.id.edit_password)
         spinnerCarrier = findViewById(R.id.spinner_carrier)
-        // removemorning1：元素 11 的控件已在布局与代码中删除（详见下方注释）
-        // removemorning1：【元素 11】的三个控件（开关 / 早上状态行 / 自启动跳转）已从布局与代码中删除。
+        // restoretoggle1：元素 11 的「开关按钮 + 状态文本」恢复绑定（与布局中的 id 一一对应）。
+        btnToggleAutoLogin = findViewById(R.id.btn_toggle_auto_login)
+        textAutoLoginStatus = findViewById(R.id.text_auto_login_status)
         editLabel = findViewById(R.id.edit_label)
         btnUseCurrentWifi = findViewById(R.id.btn_use_current_wifi)
         ssidList = findViewById(R.id.ssid_list)
@@ -557,10 +565,16 @@ class MainActivity : Activity() {
             render()
         }
 
-        // 【元素 11】启停开关：点击 → 切换「自动登录启用/停用」→ 持久化 → 起停前台服务与 06:00 闹钟
-        // removemorning1：启停开关的点击监听已删除（控件与处理函数一并移除）。
+        // 【元素 11】启停开关（restoretoggle1 恢复）：点击 → 切换「后台自动登录」启用/停用 →
+        // **立即持久化**（AutoLoginSwitch.setEnabled）→ **立即刷新**三处：状态文本 + 常驻通知 + 日志。
+        // 语义（用户已确认）：启用 ⇒ 显示常驻通知 + 网络变化生效 + 15 分钟周期保底生效；
+        //                    停用 ⇒ 通知消失 + 网络变化不生效 + 周期保底不生效。
+        btnToggleAutoLogin.setOnClickListener { toggleAutoLoginStatus() }
+        // 首次进入界面时按真实状态刷新（默认「已启用」→ 绿色「自动登录已启用」）
+        renderAutoLoginStatus()
 
-        // 【元素 11】自启动权限：一键跳转系统「自启动管理」页（失败降级到应用详情页）
+        // 【元素 11】自启动权限说明与一键跳转：**按用户要求不恢复**（那属于开机广播场景，
+        // 用户接受「手机重启后最多等 15 分钟」的后果，本次明确不恢复开机广播与自启动文案）。
 
         // 元素 6：权限说明流程（严格顺序）
         btnRequestPermission.setOnClickListener {
@@ -1378,6 +1392,123 @@ class MainActivity : Activity() {
         // 【uifix2 任务 C-2】Portal 地址常驻状态：每次 render() 都同步刷新
         //（启动 / 保存 Portal 后 / 切换 WiFi / 权限变化……任何一次界面刷新都会带上它）
         renderPortalStatus()
+
+        // restoretoggle1（元素 11）：开关状态文本同样**常驻**——每次 render() 都按真实状态刷新
+        //（启动 / 点击切换 / 权限变化……都带上它），因此「状态文本」永远与开关的真实取值一致。
+        renderAutoLoginStatus()
+
+        // restoretoggle1：界面可见期间（Activity 在前台）顺带把常驻通知同步成开关的当前状态。
+        // 为什么放在 render 里：这是唯一「确定应用处于前台」的渲染路径 → 从后台启动前台服务
+        // 会触发 Android 12+ 的限制，而在前台启动永远合法。停用时同一条路径会把通知停掉。
+        syncForegroundNotificationWithSwitch()
+    }
+
+    /**
+     * 【restoretoggle1】元素 11：点击开关 → 切换「后台自动登录」启用/停用。
+     *
+     * 一次点击要同时保证四件事，缺一件用户就会觉得「开关没生效」：
+     *   ① 持久化：`AutoLoginSwitch.setEnabled`（新键 `srun_auto_login_enabled_v1`，立即落盘）；
+     *   ② 状态文本：绿「自动登录已启用」/ 红「自动登录已停用」（由 [applyStateColor] 按状态设色）；
+     *   ③ 常驻通知：启用 → `startForegroundService`；停用 → `stopService`（通知消失）；
+     *   ④ 日志：AppLog 记一条「用户操作：切换自动登录开关 → 启用/停用」（界面「日志」按钮可见）。
+     *
+     * 「启用」时若 API 33+ 尚未授予通知权限 → 先弹系统权限框（结果在 [onRequestPermissionsResult] 里
+     * 继续走③）；权限被拒**不影响后台任务**：后台登录照常执行，只是看不到常驻通知（并在日志/提示里说明）。
+     * 整段用 try/catch 包住：开关操作绝不允许闪退。
+     */
+    private fun toggleAutoLoginStatus() {
+        try {
+            val kv = SrunStorage.keyValueStore(this)
+            val current = AutoLoginSwitch.isEnabled(kv)
+            val next = !current
+            val actual = AutoLoginSwitch.setEnabled(kv, next)   // ① 立即持久化（写后读回校验）
+
+            // ④ 日志（先写：即便后面启动前台服务被系统拒绝，用户也能在日志里看到这次操作）
+            appLog("用户操作：切换自动登录开关 → ${if (actual) "启用" else "停用"}")
+
+            // ③ 常驻通知联动
+            if (actual) {
+                if (MorningAuthForegroundService.notificationPermissionGranted(this)) {
+                    startForegroundServiceIfEnabled()
+                } else {
+                    requestNotificationPermissionIfNeeded()
+                }
+            } else {
+                stopForegroundNotification(reason = "用户停用开关")
+            }
+
+            // ② 状态文本 + 三处一致（render 里也会再刷一次，这里先刷保证点击即时反馈）
+            renderAutoLoginStatus()
+            toast(getString(if (actual) R.string.auto_login_status_enabled else R.string.auto_login_status_disabled))
+        } catch (t: Throwable) {
+            // 开关操作异常不能闪退：记 logcat + 日志，并把状态文本刷成真实值
+            Log.e(TAG, "切换自动登录开关失败（已忽略异常）", t)
+            appLog("用户操作：切换自动登录开关失败（${t.javaClass.simpleName}）")
+            runCatching { renderAutoLoginStatus() }
+        }
+    }
+
+    /**
+     * 【restoretoggle1】状态文本：**颜色由代码按状态设置**（绿 = 已启用 / 红 = 已停用），
+     * 不在 XML 里写死单色；文案逐字用 `auto_login_status_enabled/disabled`。
+     */
+    private fun renderAutoLoginStatus() {
+        if (!this::textAutoLoginStatus.isInitialized) return
+        val enabled = runCatching { AutoLoginSwitch.isEnabled(SrunStorage.keyValueStore(this)) }
+            .getOrDefault(AutoLoginSwitch.DEFAULT_ENABLED)
+        textAutoLoginStatus.text =
+            getString(if (enabled) R.string.auto_login_status_enabled else R.string.auto_login_status_disabled)
+        applyStateColor(textAutoLoginStatus, if (enabled) COLOR_STATUS_OK else COLOR_STATUS_FAIL)
+    }
+
+    /** 【restoretoggle1】按开关状态把常驻通知同步到位（只在前台渲染路径调用 → 合法启动）。 */
+    private fun syncForegroundNotificationWithSwitch() {
+        val enabled = runCatching { AutoLoginSwitch.isEnabled(SrunStorage.keyValueStore(this)) }
+            .getOrDefault(AutoLoginSwitch.DEFAULT_ENABLED)
+        if (enabled && MorningAuthForegroundService.notificationPermissionGranted(this)) {
+            startForegroundServiceIfEnabled()
+        }
+    }
+
+    /** 启动常驻通知前台服务（**只在开关为「已启用」时**真正启动；失败已被扩展方法吞掉并记日志）。 */
+    private fun startForegroundServiceIfEnabled() {
+        val enabled = runCatching { AutoLoginSwitch.isEnabled(SrunStorage.keyValueStore(this)) }
+            .getOrDefault(AutoLoginSwitch.DEFAULT_ENABLED)
+        if (!enabled) {
+            appLog("调度：自动登录已停用，跳过：启动常驻通知")
+            return
+        }
+        startAutoLoginNotification()
+    }
+
+    /** 停止常驻通知前台服务（用户停用开关时）。 */
+    private fun stopForegroundNotification(reason: String) {
+        appLog("应用执行：停止常驻通知（$reason）")
+        stopAutoLoginNotification()
+    }
+
+    /**
+     * 【restoretoggle1】API 33+ 的 POST_NOTIFICATIONS 申请（零第三方依赖，框架 API）。
+     * 只在用户**点击启用**时申请 —— 符合「权限与当前操作直接相关」的最小化原则；
+     * 被拒也不阻断后台登录，只是看不到常驻通知（[R.string.auto_login_toast_notification_denied]）。
+     */
+    private fun requestNotificationPermissionIfNeeded() {
+        if (MorningAuthForegroundService.notificationPermissionGranted(this)) {
+            startForegroundServiceIfEnabled()
+            return
+        }
+        try {
+            if (Build.VERSION.SDK_INT >= 33) {
+                appLog("用户操作：申请通知权限（用于显示常驻通知）")
+                requestPermissions(arrayOf(android.Manifest.permission.POST_NOTIFICATIONS), REQ_NOTIFICATION)
+            } else {
+                // 低版本无需运行时权限：直接启动（系统仍可能拒绝后台启动，已 try/catch）
+                startForegroundServiceIfEnabled()
+            }
+        } catch (t: Throwable) {
+            Log.e(TAG, "申请通知权限失败（已忽略）", t)
+            toast(getString(R.string.auto_login_toast_notification_denied))
+        }
     }
 
     /**
@@ -1406,6 +1537,19 @@ class MainActivity : Activity() {
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         // removemorning1：原【元素 11】的 POST_NOTIFICATIONS 结果分支已删除（通知权限申请入口已随早上任务移除）。
+        // restoretoggle1：通知权限申请结果（元素 11 开关启用路径）
+        if (requestCode == REQ_NOTIFICATION) {
+            val granted = grantResults.isNotEmpty() &&
+                grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+            appLog("用户操作：通知权限 ${if (granted) "已授予" else "被拒绝"}")
+            if (granted) {
+                // 权限到手 → 立即把常驻通知拉起来（用户启用开关的语义就是「要看到它在工作」）
+                startForegroundServiceIfEnabled()
+            } else {
+                toast(getString(R.string.auto_login_toast_notification_denied))
+            }
+            return
+        }
         if (requestCode != REQ_WIFI) return
         val granted = grantResults.isNotEmpty() &&
             grantResults.all { it == PackageManager.PERMISSION_GRANTED }
@@ -1448,6 +1592,8 @@ class MainActivity : Activity() {
 
     private companion object {
         const val REQ_WIFI = 1001
+        /** 【restoretoggle1】通知权限申请的请求码（元素 11 开关启用路径）。 */
+        const val REQ_NOTIFICATION = 1002
 
         /** 【元素 11】通知权限（POST_NOTIFICATIONS）的请求码：与 WiFi 权限的请求码必须不同，否则结果回调会串。 */
 

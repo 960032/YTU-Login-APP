@@ -1,7 +1,11 @@
 package top.ytu.srunautologin
 
 import android.app.Application
+import top.ytu.srunautologin.platform.SrunStorage
 import top.ytu.srunautologin.work.AuthJobs
+import top.ytu.srunautologin.work.AutoLoginSwitch
+import top.ytu.srunautologin.work.MorningAuthForegroundService
+import top.ytu.srunautologin.work.startAutoLoginNotification
 import top.ytu.srunautologin.work.AuthWorkWiring
 import top.ytu.srunautologin.work.NetworkChangeReceiver
 import top.ytu.srunautologin.work.NetworkWatcher
@@ -28,10 +32,19 @@ class App : Application() {
     override fun onCreate() {
         super.onCreate()
         try {
-            // removemorning1：原「启停开关停用 → 一个后台入口都不注册/不排期」的闸门已移除。
-            // 依据：该开关的唯一界面入口（morning1 的启停按钮）按用户要求删除，开关默认值是停用
-            // （MorningStateStore.DEFAULT_ENABLED = false）；保留闸门会让「网络变化 + 周期保底」
-            // 这两条**必须保留**的通道在默认配置下全部失效（等于取消全部后台登录）。
+            // restoretoggle1（用户要求「恢复控制开关 + 默认启用」）：闸门**恢复**，但语义与 removemorning1
+            // 当年的情形已不同——开关的界面入口（按钮 + 绿/红状态文本）本次一并恢复，且默认是**启用**
+            // （AutoLoginSwitch.DEFAULT_ENABLED = true），因此保留闸门不再有「默认配置下后台全失效」的风险：
+            //   · 启用（默认）→ 下面三条通道照旧全部注册；
+            //   · 停用（用户主动点击）→ 直接返回：不注册监听、不排期、不认证（并落一条日志）。
+            val switchKv = SrunStorage.keyValueStore(this)
+            AutoLoginSwitch.gateReason(switchKv, "App.onCreate")?.let { reason ->
+                AuthWorkWiring.progress(this, reason)
+                runCatching {
+                    top.ytu.srunautologin.log.AppLog.record(switchKv, "调度：$reason")
+                }
+                return
+            }
 
             // 触发点 2：WiFi 连接变化（两条通道都注册）
             NetworkChangeReceiver.register(this)
@@ -48,11 +61,52 @@ class App : Application() {
                 "App.onCreate: 已注册网络监听 + 周期保底（间隔 ${AuthJobs.PERIODIC_INTERVAL_MINUTES} 分钟）"
             )
 
-            // removemorning1：原先这里还会「进程重建时恢复早上任务的常驻通知」——
-            // 该前台服务随早上任务一并移除，这段恢复逻辑整体删除。
+            // restoretoggle1：进程重建/App 启动时按开关状态**恢复常驻通知**（否则重启 App 后通知不见了）。
+            // 只在「已启用」时恢复（正面判断）；前台服务启动受 Android 12+ 后台启动限制，
+            // 是否真的在后台由 MorningAuthForegroundService.startIfAllowed() 判定（内部 try/catch 兜住）。
+            resumeForegroundNotificationIfEnabled()
+
+            // restoretoggle1：应用被覆盖安装/升级（ACTION_MY_PACKAGE_REPLACED）后本进程会被重建，
+            // 而系统在升级时会杀掉进程并移除前台状态 —— 这是「升级后通知不见了」最可能的真机场景。
+            // 该广播**不是开机广播**（BOOT_COMPLETED 仍保持删除状态），只在本应用被替换时由系统投递。
+            // 启动前台服务仍可能被系统拒绝（后台启动限制）→ 同样走 startIfAllowed() 的 try/catch，绝不崩溃。
+            try {
+                registerReceiver(
+                    packageReplacedReceiver,
+                    android.content.IntentFilter(android.content.Intent.ACTION_MY_PACKAGE_REPLACED)
+                )
+            } catch (t: Throwable) {
+                AuthWorkWiring.progress(this, "App.onCreate 注册升级广播失败（已忽略）：${t.javaClass.simpleName}")
+            }
         } catch (e: Throwable) {
             // 任何初始化异常都不能让应用起不来：记录后继续
             AuthWorkWiring.progress(this, "App.onCreate 初始化失败：${e.javaClass.simpleName}: ${e.message}")
+        }
+    }
+
+    /**
+     * 升级/覆盖安装后的恢复路径。**只做一件事**：若开关为「已启用」就请求启动常驻通知前台服务。
+     * 前台服务启动限制（Android 12+ 后台启动抛 ForegroundServiceStartNotAllowedException、
+     * Android 14+ 还要求类型与权限匹配）全部由 startIfAllowed() 兜住，这里不再重复 try/catch。
+     */
+    private val packageReplacedReceiver = object : android.content.BroadcastReceiver() {
+        override fun onReceive(context: android.content.Context?, intent: android.content.Intent?) {
+            if (intent?.action != android.content.Intent.ACTION_MY_PACKAGE_REPLACED) return
+            AuthWorkWiring.progress(
+                applicationContext,
+                "升级完成（ACTION_MY_PACKAGE_REPLACED）→ 按开关状态恢复常驻通知"
+            )
+            resumeForegroundNotificationIfEnabled()
+        }
+    }
+
+    /** 「已启用」时确保常驻通知在运行；停用时**什么都不做**（通知在用户停用时已停止）。 */
+    private fun resumeForegroundNotificationIfEnabled() {
+        val kv = SrunStorage.keyValueStore(this)
+        if (AutoLoginSwitch.isEnabled(kv)) {
+            startAutoLoginNotification()
+        } else {
+            AuthWorkWiring.progress(this, "自动登录已停用，跳过：App.onCreate 恢复常驻通知")
         }
     }
 }

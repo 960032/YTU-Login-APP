@@ -33,12 +33,21 @@
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- removemorning1：RECEIVE_BOOT_COMPLETED 已删除（开机广播触发通道关闭，全工程已无引用）；
-         POST_NOTIFICATIONS / FOREGROUND_SERVICE / FOREGROUND_SERVICE_DATA_SYNC 已删除
-         （唯一使用者 = 早上任务的常驻通知前台服务，已随早上任务移除）。 -->
+    <!-- removemorning1：RECEIVE_BOOT_COMPLETED **仍为删除状态**（开机广播触发通道保持关闭，用户未要求恢复）。
+         restoretoggle1：POST_NOTIFICATIONS / FOREGROUND_SERVICE / FOREGROUND_SERVICE_DATA_SYNC
+         **已恢复**——用户明确要求「恢复常驻通知（方案 A）」，前台服务的三个权限是其最低必要集。 -->
 
     <!-- 保留：SCHEDULE_EXACT_ALARM —— 现在归「探测不确定 → 5 分钟重试」的精确闹钟通道使用 -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
+
+    <!-- restoretoggle1（用户要求「恢复常驻通知，方案 A」）：前台服务 + 通知权限**恢复**
+         （removemorning1 曾随早上任务一并删除）。三条权限的用途都是常驻通知前台服务：
+           POST_NOTIFICATIONS          → API 33+ 显示通知必须的运行时权限（被拒时降级：后台任务照常，通知不显示）
+           FOREGROUND_SERVICE          → API 28+ 使用前台服务的通用权限
+           FOREGROUND_SERVICE_DATA_SYNC→ API 34+ 的「类型权限」，与 manifest 里 foregroundServiceType="dataSync" 配对 -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
 
     <!-- 既有：联网与网络状态 -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -98,13 +107,17 @@
             android:permission="android.permission.BIND_JOB_SERVICE" />
 
         <!--
-          removemorning1：morning1 的「常驻通知前台服务」**已连同 manifest 声明一起删除**。
-          判断依据（证据见 artifacts/removemorning1/fix-report.md 的 B 段）：
-            - 它的**唯一**启动路径是「早上自动登录的启停开关」（MainActivity 的开关点击处理）
-              与 App.onCreate 里同一个开关判断，两者都随早上任务移除；
-            - 周期保底（AuthJobService）明确**不使用**前台服务（见 work/AuthJobService.kt 类注释：
-              「不使用前台服务」），因此删除它不影响保留的 15 分钟周期通道。
+          restoretoggle1（用户要求「恢复常驻通知，方案 A」）：常驻通知前台服务**恢复声明**。
+          它只做两件事：显示/移除一条不可消除的常驻通知 + 保持前台状态；**不做认证**
+          （认证仍由上面的 AuthJobService 执行，两者生命周期本就不同）。
+          类型选 dataSync（标准类型，无需 specialUse 的额外 property 与人工审核）：
+          与类型权限 FOREGROUND_SERVICE_DATA_SYNC 配对，通用权限 FOREGROUND_SERVICE 同时声明。
+          exported="false"：只有本应用自己启动它（启动/停止均由 AutoLoginSwitch 的状态决定）。
         -->
+        <service
+            android:name="top.ytu.srunautologin.work.MorningAuthForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="dataSync" />
 
         <!--
           removemorning1：本接收者 **保留**（**不是**早上任务专用）。

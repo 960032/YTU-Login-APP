@@ -8,6 +8,7 @@ import android.net.Network
 import android.net.NetworkCapabilities
 import android.net.NetworkRequest
 import android.os.Build
+import top.ytu.srunautologin.platform.SrunStorage
 
 /**
  * ============================ Android 边界层（未验证部分）============================
@@ -60,10 +61,12 @@ class NetworkChangeReceiver : BroadcastReceiver() {
             AuthWorkWiring.progress(ctx, "trigger: CONNECTIVITY_ACTION（非 WiFi，忽略）")
             return
         }
-        // removemorning1：原「启停开关停用 → 直接返回」的闸门已移除。
-        // 依据：开关唯一的界面入口（morning1 的启停按钮）按用户要求删除；而开关默认值是
-        // 停用（MorningStateStore.DEFAULT_ENABLED = false），保留闸门会让这两条**必须保留**
-        // 的网络变化通道在默认配置下全部失效，等于变相「取消全部后台登录」。
+        // restoretoggle1：闸门恢复（开关 UI 已同时恢复，且默认启用）。停用 ⇒ 直接返回：不排期、不认证。
+        AutoLoginSwitch.gateReason(SrunStorage.keyValueStore(ctx), "NetworkChangeReceiver.onReceive（网络变化）")
+            ?.let {
+                AuthWorkWiring.progress(ctx, it)
+                return
+            }
         AuthWorkWiring.progress(ctx, "trigger: CONNECTIVITY_ACTION（已连上 WiFi）")
         AuthWorkWiring.scheduler(ctx).enqueueAuth(
             delayMillis = WIFI_CONNECT_SETTLE_MILLIS,
@@ -129,7 +132,12 @@ object NetworkWatcher {
             .build()
         val callback = object : ConnectivityManager.NetworkCallback() {
             private fun onWifiEvent(what: String) {
-                // removemorning1：启停开关闸门已移除（理由同 NetworkChangeReceiver.onReceive）。
+                // restoretoggle1：闸门恢复（开关 UI 已同时恢复）。停用 ⇒ 直接返回：不排期、不认证。
+                AutoLoginSwitch.gateReason(SrunStorage.keyValueStore(ctx), "NetworkWatcher.NetworkCallback($what)")
+                    ?.let {
+                        AuthWorkWiring.progress(ctx, it)
+                        return
+                    }
                 AuthWorkWiring.progress(ctx, "trigger: NetworkCallback($what)")
                 AuthWorkWiring.scheduler(ctx).enqueueAuth(
                     delayMillis = NetworkChangeReceiver.WIFI_CONNECT_SETTLE_MILLIS,
