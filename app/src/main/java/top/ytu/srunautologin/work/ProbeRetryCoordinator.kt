@@ -71,23 +71,30 @@ object ProbeRetryCoordinator {
         scheduleRetry: ((Long) -> Unit)? = null
     ): Action {
         if (!probeEnabled || ssid.isNullOrBlank()) return Action.NONE
-        val store = ProbeAttemptStore(kv)
-        val state = store.loadFor(ssid)
-        val decision = ProbeRetryPolicy.canProbe(state, nowMillis)
-        if (decision.canRetry) {
-            // 还没探测过、或已过 5 分钟：允许这一次探测（探测动作在 AuthFlow 内）
-            return Action.NONE
-        }
-        if (state.attempts >= ProbeRetryPolicy.MAX_ATTEMPTS) {
+        // 【gatefix1 任务 A 段】本闸门**只观测、不再阻断**：无论历史计数如何，一律返回 [Action.NONE]
+        // （= 调用方继续执行认证）。
+        //
+        // 为什么必须改：探测重试通道已实质退役（probefix1 任务 B 段：探测「不确定」→ AuthFlow 降级继续
+        // 认证，不再记「不确定」次数、也不再排 5 分钟重试）。既然已无人再写这个计数，「距上次探测不足
+        // 5 分钟 → WAIT」与「次数用尽 → GIVE_UP」两个判定就只剩危害：真机上残留的
+        // `srun_probe_attempt_v1`（attempts >= MAX_ATTEMPTS）会让本函数返回 GIVE_UP，而两个调用点对
+        // WAIT/GIVE_UP **直接 return**（work/AuthWorkWiring.kt:232-249、work/MorningAuthRuntime.kt:317-323）
+        // → 每次网络变化都被挡在 AuthFlow 之外，即便 probefix1 已把「不确定」改成降级认证也永远进不去
+        // （真机表现为登录被**永久闸死**，只能靠用户手动点「立即登录」或清数据）。
+        //
+        // 保留的能力（**未被破坏**）：[ProbeAttemptStore] 的计数读写、[ProbeRetryPolicy] 常量、
+        // [reset]、[afterProbe] 全部原样保留；枚举 [Action].WAIT/RETRY/GIVE_UP 与常量**都不删**
+        // （仍可能被别处引用）——本函数只是**不再返回**这两个阻塞值，判定逻辑改为一律放行。
+        // 参数 nowMillis / scheduleRetry 保留在签名里（两个调用点按名传参），但本函数不再使用它们。
+        val state = runCatching { ProbeAttemptStore(kv).loadFor(ssid) }.getOrNull()
+        if (state != null && state.attempts >= ProbeRetryPolicy.MAX_ATTEMPTS) {
             log(
                 kv,
                 "网络检测：「$ssid」探测已连续 ${state.attempts} 次不确定（上限 ${ProbeRetryPolicy.MAX_ATTEMPTS} 次）" +
-                    "→ 记日志后不再尝试（等网络变化或用户手动点「立即登录」重新开始）"
+                    "→ 仅记日志；探测重试已退役，本次继续执行认证（不再阻断）"
             )
-            return Action.GIVE_UP
         }
-        log(kv, "网络检测：「$ssid」${decision.reason} → 本次不探测、不登录")
-        return Action.WAIT
+        return Action.NONE
     }
 
     /**
