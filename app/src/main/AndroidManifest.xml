@@ -3,23 +3,27 @@
   SrunAutoLogin AndroidManifest。
 
   权限台账（N4/B9：只留必要项）：
-    本任务（后台调度）新增：
-      - RECEIVE_BOOT_COMPLETED   ← 开机自启（B4 触发点 1）
+    【removemorning1（用户要求）】已**删除** RECEIVE_BOOT_COMPLETED：
+      用户原话「关闭开机广播的触发通道，取消每天早上 6:00 的状态机和任务闹钟以及相应提示文本」。
+      静态注册的开机广播接收者（BootCompletedReceiver + BOOT_COMPLETED / LOCKED_BOOT_COMPLETED /
+      MY_PACKAGE_REPLACED 三个 action）整块删除；该权限在全工程已无任何使用者（grep 证据见
+      artifacts/removemorning1/fix-report.md 的 A 段）。
+      同时删除 POST_NOTIFICATIONS / FOREGROUND_SERVICE / FOREGROUND_SERVICE_DATA_SYNC
+      （唯一使用者 = 早上任务的常驻通知前台服务，与早上任务一并移除，见 B 段）。
     既有：
       - INTERNET / ACCESS_NETWORK_STATE  （认证客户端 + 网络状态判断，上一任务）
       - ACCESS_WIFI_STATE / CHANGE_WIFI_STATE / ACCESS_FINE_LOCATION / NEARBY_WIFI_DEVICES（WiFi 感知，上一任务）
   **明确不加**：AccessibilityService（BIND_ACCESSIBILITY_SERVICE）、悬浮窗（SYSTEM_ALERT_WINDOW）、
   QUERY_ALL_PACKAGES、READ_CALL_LOG / READ_SMS / READ_CONTACTS、POST_NOTIFICATIONS
   （本版本不发送任何通知，故不申请；理由见 artifacts/android-ci/ci-report.md）。
-  【morning1 任务新增（用户新需求：常驻通知 + 每日 6:00 精确唤醒）】
-      - POST_NOTIFICATIONS             ← API 33+ 显示常驻通知的运行时权限（启用开关时申请，被拒则界面提示）
-      - FOREGROUND_SERVICE             ← 前台服务通用权限（API 28+ 必需）
-      - FOREGROUND_SERVICE_DATA_SYNC   ← 前台服务类型权限（API 34+ 强制：类型与权限必须同时声明）
-      - SCHEDULE_EXACT_ALARM           ← API 31+ 精确闹钟（用户可在系统「闹钟与提醒」里关闭；
-                                           未授权时降级为 setAndAllowWhileIdle 并记日志，不静默失败）
-  【前台服务类型选择依据】dataSync：本服务只做「与服务器同步登录状态」的常驻通知；
-     不用 specialUse（需额外 <property> 子类型声明 + Play 人工审核，本应用完全可用标准类型），
-     不用 shortService（约 3 分钟上限，与「待机时常驻通知」冲突）。详见 work/MorningAuthForegroundService.kt 的类注释。
+  【removemorning1（用户要求）】已**删除** POST_NOTIFICATIONS / FOREGROUND_SERVICE /
+      FOREGROUND_SERVICE_DATA_SYNC：它们的唯一使用者是 morning1 的常驻通知前台服务，
+      而该服务只服务于「每天早上 6:00 的自动登录 + 应用内启停开关」，两者都随本任务移除
+      （判断依据与全工程引用证据见 artifacts/removemorning1/fix-report.md 的 B 段）。
+      「前台服务类型 dataSync」的取舍说明随之作废（不再声明任何前台服务）。
+  【保留 SCHEDULE_EXACT_ALARM】精确闹钟权限**必须保留**：它现在归「探测不确定 → 5 分钟重试」这条
+      闹钟通道使用（work/AuthWorkWiring.kt 的 scheduleRetry → MorningAuthRuntime.scheduleProbeRetry），
+      该通道与本任务无关、按用户要求保留。未授权时降级为 setAndAllowWhileIdle 并记日志，不静默失败。
 
   明文 HTTP（crashfix1 任务 B）：
     targetSdk = 36 → Android 9（API 28）起 cleartextTrafficPermitted 默认 false。SRun 门户是纯 http://
@@ -29,14 +33,11 @@
 -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <!-- 本任务新增（B4 触发点 1：开机自启） -->
-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <!-- removemorning1：RECEIVE_BOOT_COMPLETED 已删除（开机广播触发通道关闭，全工程已无引用）；
+         POST_NOTIFICATIONS / FOREGROUND_SERVICE / FOREGROUND_SERVICE_DATA_SYNC 已删除
+         （唯一使用者 = 早上任务的常驻通知前台服务，已随早上任务移除）。 -->
 
-    <!-- 既有：联网与网络状态 -->
-    <!-- morning1 任务新增：常驻通知 + 前台服务 + 精确闹钟 -->
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <!-- 保留：SCHEDULE_EXACT_ALARM —— 现在归「探测不确定 → 5 分钟重试」的精确闹钟通道使用 -->
     <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
 
     <!-- 既有：联网与网络状态 -->
@@ -80,22 +81,12 @@
         </activity>
 
         <!--
-          B4 触发点 1：开机自启。
-          BOOT_COMPLETED / LOCKED_BOOT_COMPLETED / MY_PACKAGE_REPLACED 属于 Android 7+ 隐式广播
-          限制的**豁免清单**，可以静态注册。
-          exported 显式声明为 true：这三个广播由系统/系统组件发出，必须可被外部（系统）投递。
+          removemorning1（用户要求「关闭开机广播的触发通道」）：
+          B4 触发点 1（开机自启）的静态广播接收者**已整块删除**——接收者类连同
+          BOOT_COMPLETED / LOCKED_BOOT_COMPLETED / MY_PACKAGE_REPLACED 三个 action 一并移除，
+          RECEIVE_BOOT_COMPLETED 权限同步删除（全工程已无引用）。
+          进程被杀后的兜底改为：周期保底（15 分钟 JobScheduler，App.onCreate 注册）+ 网络变化（动态注册）。
         -->
-        <receiver
-            android:name="top.ytu.srunautologin.work.BootCompletedReceiver"
-            android:enabled="true"
-            android:exported="true"
-            android:directBootAware="false">
-            <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED" />
-                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
-                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
-            </intent-filter>
-        </receiver>
 
         <!--
           B4 触发点 3：周期保底 + 退避重试的执行体（JobScheduler 方案）。
@@ -107,19 +98,20 @@
             android:permission="android.permission.BIND_JOB_SERVICE" />
 
         <!--
-          morning1：常驻通知的前台服务（用户要求「应用在后台待机时推送常驻通知」）。
-          - exported=false：只允许本应用启动；
-          - foregroundServiceType="dataSync"：API 34+ 必须显式声明类型，且类型权限
-            FOREGROUND_SERVICE_DATA_SYNC 已在上方声明；
-          - 本服务**不做认证**，只负责「常驻通知 + 存活」；认证仍由 AuthJobService 执行。
+          removemorning1：morning1 的「常驻通知前台服务」**已连同 manifest 声明一起删除**。
+          判断依据（证据见 artifacts/removemorning1/fix-report.md 的 B 段）：
+            - 它的**唯一**启动路径是「早上自动登录的启停开关」（MainActivity 的开关点击处理）
+              与 App.onCreate 里同一个开关判断，两者都随早上任务移除；
+            - 周期保底（AuthJobService）明确**不使用**前台服务（见 work/AuthJobService.kt 类注释：
+              「不使用前台服务」），因此删除它不影响保留的 15 分钟周期通道。
         -->
-        <service
-            android:name="top.ytu.srunautologin.work.MorningAuthForegroundService"
-            android:exported="false"
-            android:foregroundServiceType="dataSync" />
 
         <!--
-          morning1：每日 06:00 / +10 分钟重试闹钟的回调。
+          removemorning1：本接收者 **保留**（**不是**早上任务专用）。
+          它的 action（ACTION_MORNING）现在只服务「探测不确定 → 5 分钟重试」这条闹钟通道
+          （work/AuthWorkWiring.kt 的 scheduleRetry → MorningAuthRuntime.scheduleProbeRetry）。
+          06:00 的首次闹钟与 +10 分钟重试**已不在任何地方排期**；接收者内部对非探测来源的触发
+          一律直接返回（见 work/MorningAuthRuntime.kt 的 MorningAlarmReceiver.handle）。
           exported=false：只接收本应用自己发的 PendingIntent（不需要外部投递）。
         -->
         <receiver

@@ -310,7 +310,14 @@ object AuthWorkWiring {
         val result = run.coordinator.run(target)
         // 【logfix1 任务 B 段】重试排期：把「第几次 + 延迟多少秒」记下来（与 AuthJobService 的
         // enqueueAuth 一一对应；在这里记是因为它同时覆盖 JobService 与「原地 run」两条调用路径）。
-        if (result.outcome == RunOutcome.RETRY_SCHEDULED || result.outcome == RunOutcome.SKIPPED_ZERO_REQUEST) {
+        // 【Bug C 修复（removemorning1）·日志面】「服务端返回已在线」（code=E_SKIP_ALREADY_ONLINE，
+        // 语义 = AuthSkipReason.ALREADY_ONLINE.code）是**成功达成目标**：既不排重试、也不变更任何计数，
+        // 因此不再给它打下面那句「安排重试」日志 —— 此前它同样落进这条分支，日志与真实行为不符；
+        // 用户真机日志里的「调度：安排重试（第 3/5 次，延迟 30s，原因 E_SKIP_ALREADY_ONLINE）」正来自本行
+        //（attempt=3 不消耗 + delaySeconds=30 就是 SKIPPED_ZERO_REQUEST 的既有语义，逐字吻合）。
+        // 跳过本身的说明日志由 AuthWorkCoordinator.logResult 的「跳过（零请求）」一条覆盖，不会静默。
+        val alreadyOnline = result.code == "E_SKIP_ALREADY_ONLINE"
+        if (!alreadyOnline && (result.outcome == RunOutcome.RETRY_SCHEDULED || result.outcome == RunOutcome.SKIPPED_ZERO_REQUEST)) {
             runCatching {
                 AppLog.record(
                     logStore,
@@ -325,12 +332,10 @@ object AuthWorkWiring {
     /** 开机/网络恢复后调用：注册周期保底并排一次尽快认证。 */
     fun onTrigger(context: Context, reason: String, initialDelayMillis: Long) {
         val appContext = context.applicationContext
-        // 【C4 覆盖检查：入口 2/7】boot / app-start / network 三条通道共用本入口。
-        // 停用时**直接返回**：不注册周期保底、不排认证任务（用户要求「用户启用后才执行后台任务」）。
-        if (!MorningAuthRuntime.isEnabled(appContext)) {
-            progress(appContext, "onTrigger($reason)：自动登录已停用 → 直接返回（不排期）")
-            return
-        }
+        // removemorning1：原「启停开关停用 → 直接返回（不排期）」的闸门已移除。
+        // 依据：开关的唯一界面入口（morning1 的启停按钮）按用户要求删除，且开关默认值是停用
+        //（MorningStateStore.DEFAULT_ENABLED = false）；保留闸门会让周期保底与网络变化这两条
+        // **必须保留**的通道在默认配置下全部失效，等于变相取消全部后台登录。
         try {
             scheduler(appContext).ensurePeriodic()
             scheduler(appContext).enqueueAuthReplacing(initialDelayMillis, reason)

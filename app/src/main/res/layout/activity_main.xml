@@ -223,47 +223,11 @@
             android:textColor="@color/portal_status_unsaved_text"
             android:textStyle="bold" />
 
-        <!-- ================= 元素 11：早上自动登录（morning1 任务）=================
-             用户要求：①「点击(启用/停用)自动登录」启停开关；②权限描述文本
-             「登录任务需要自启动权限，该权限用于每天早上的自动唤起。」+ 一键跳转系统设置。
-             控件全部为系统原生 View（无 androidx/Compose），与既有界面风格一致。 -->
-        <View
-            android:layout_width="match_parent"
-            android:layout_height="1dp"
-            android:layout_marginTop="18dp"
-            android:background="@color/permission_divider" />
-
-        <Button
-            android:id="@+id/btn_toggle_auto_login"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="10dp"
-            android:text="@string/btn_toggle_auto_login" />
-
-        <TextView
-            android:id="@+id/text_morning_status"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
-            android:text="@string/morning_status_disabled"
-            android:textColor="@color/permission_notice_text"
-            android:textSize="13sp" />
-
-        <TextView
-            android:id="@+id/text_autostart_notice"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="14dp"
-            android:text="@string/morning_autostart_notice"
-            android:textColor="@color/permission_notice_text"
-            android:textSize="13sp" />
-
-        <Button
-            android:id="@+id/btn_open_autostart_settings"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="6dp"
-            android:text="@string/morning_btn_open_autostart" />
+        <!-- removemorning1（用户要求）：元素 11（早上自动登录：启停开关按钮 / 开关状态行 /
+             自启动权限说明文本 / 前往系统设置开启自启动按钮）**整块删除**——
+             不再有开机广播，自启动说明已无意义；也不再需要「点击切换自动登录状态」。
+             其余控件（账号、密码、登录方式、备注名、WiFi 选择、权限、保存、状态区、
+             立即登录、Portal、账号选择、日志）一律保留。 -->
 
         <Button
             android:id="@+id/btn_save_portal"            android:layout_width="match_parent"

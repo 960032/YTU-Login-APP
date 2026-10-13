@@ -18,16 +18,18 @@ import top.ytu.srunautologin.platform.SrunStorage
  * [MorningAutoLogin] / [MorningAutoLoginPolicy] 里，可在 JVM 上复核。
  * ==================================================================================================
  *
- * 【为什么用 AlarmManager 而不是既有 JobScheduler】用户要求「6:00 精确」。
- *   JobScheduler 的周期性任务在 Doze/待机分组下会被推迟（既有 15 分钟周期任务就是兜底用的），
+ * 【removemorning1（用户要求）：06:00 早上例程已整体退役】
+ *   用户原话：「关闭开机广播的触发通道，取消每天早上 6:00 的状态机和任务闹钟以及相应提示文本」。
+ *   因此本类**不再排 06:00 闹钟**：三个 06:00 排期入口（首次 / 触发后重排下一天 / +10 分钟重试）
+ *   已全部删除（它们是唯一能排 06:00 与 +10 分钟闹钟的地方）；
+ *   [MorningAlarmReceiver] 也**不再执行早上例程**，只服务「探测不确定 → 5 分钟重试」这条闹钟通道
+ *   （logfix1 任务 C 段，由 [AuthWorkWiring] 的周期任务排期 —— 与本任务无关，按用户要求保留）。
+ * 【为什么闹钟通道仍然保留 AlarmManager】探测重试用的是同一条精确闹钟通道（5 分钟）。
+ *   JobScheduler 的周期任务在 Doze/待机分组下会被推迟（15 分钟周期保底仍然保留，是另一条通道），
  *   只有 `setExactAndAllowWhileIdle` 能在 Doze 下被系统唤醒执行。
- * 【与既有 15 分钟周期任务的关系（A5：不冲突）】
- *  1. 幂等：两条通道最终都汇入同一个 [AuthJobService]（JobScheduler 任务 ID 0x5A01/0x5A02），
- *     不会各自跑一套认证；
- *  2. 互斥：[MorningAuthRuntime.LOCK] + [MorningAuthRuntime.isRunning] 保证同一时刻只有一次
- *     「早上例程」在跑；[MorningAuthRuntime.isMorningAttemptInFlight] 让周期兜底在
- *     「早上例程刚跑过（10 分钟内）」时让路，避免同一时间点打两次 Portal；
- *  3. 计数共享：当天次数只在 [MorningStateStore] 一处记账（跨进程、跨重启）。
+ * 【保留但不再被调用的纯逻辑】6:00/7:00 窗口、每天 7 次上限、计数存储
+ *   （[MorningAutoLogin] / [MorningAutoLoginPolicy] / [MorningStateStore]）原样保留，
+ *   但已经没有任何调度入口调用它们（供将来需要时复用，同时避免大范围删除带来的回归面）。
  */
 object MorningAuthRuntime {
 
@@ -58,18 +60,11 @@ object MorningAuthRuntime {
         return last > 0L && nowMillis - last < MORNING_IN_FLIGHT_WINDOW_MS
     }
 
-    /** 启停开关当前是否启用（**所有后台入口都必须先问这一句**）。 */
-    fun isEnabled(context: Context): Boolean {
-        val kv = SrunStorage.keyValueStore(context.applicationContext)
-        val stored = kv.getString(MorningStateStore.KEY_ENABLED)
-        return if (stored == null) MorningStateStore.DEFAULT_ENABLED else stored == "true"
-    }
-
-    /** 写启停开关（界面按钮 + 后台入口共用同一份存储）。 */
-    fun setEnabled(context: Context, enabled: Boolean) {
-        SrunStorage.keyValueStore(context.applicationContext)
-            .putString(MorningStateStore.KEY_ENABLED, enabled.toString())
-    }
+    // removemorning1：原启停开关的读写（isEnabled / setEnabled）已删除 ——
+    // 开关的**唯一**界面入口（morning1 的「点击切换自动登录状态」按钮）按用户要求移除，
+    // 而它的默认值是停用（MorningStateStore.DEFAULT_ENABLED = false）；
+    // 若保留任何闸门判断，会让「必须保留」的周期保底与网络变化通道在默认配置下全部失效。
+    // 存储键不再被读写，历史值成为惰性数据（不影响任何行为）。
 
     /* ------------------------------------------------------------------ 排期 */
 
@@ -95,50 +90,19 @@ object MorningAuthRuntime {
         }
     }
 
-    /**
-     * 安排**下一次 06:00**（当天 06:00 未到就今天，否则明天）。
-     *
-     * 精确可用 → `setExactAndAllowWhileIdle`（Doze 下也能准时）；
-     * 精确不可用 → **降级** `setAndAllowWhileIdle` + 明确日志（不静默失败）。
-     * 每次触发后都要重新排下一天：不用 setRepeating（它在 Doze 下不精确，且无法按结果决定当天是否继续）。
-     */
-    fun scheduleNextFirst(context: Context, nowMillis: Long = System.currentTimeMillis()): Long {
-        val ctx = context.applicationContext
-        val at = MorningAutoLogin.nextFirstMillis(nowMillis)
-        fire(ctx, at, "daily-0600")
-        setScheduledFirst(ctx, at)
-        AuthWorkWiring.progress(ctx, "早上例程：已排下一次 06:00（${MorningAutoLogin.hhmm(at)}，精确=${canScheduleExact(ctx)}）")
-        return at
-    }
-
-    /** 触发后重新排「下一天的 06:00」。 */
-    fun rearmNextDay(context: Context, nowMillis: Long = System.currentTimeMillis()): Long {
-        val ctx = context.applicationContext
-        cancel(ctx)
-        val at = MorningAutoLogin.nextFirstMillis(nowMillis)
-        fire(ctx, at, "rearm-next-day")
-        setScheduledFirst(ctx, at)
-        AuthWorkWiring.progress(ctx, "早上例程：收工，重排下一天 06:00（${MorningAutoLogin.hhmm(at)}）")
-        return at
-    }
-
-    /** 安排一次 **+10 分钟**的重试闹钟。 */
-    fun scheduleRetry(context: Context, nowMillis: Long = System.currentTimeMillis()): Long {
-        val ctx = context.applicationContext
-        val at = MorningAutoLogin.nextRetryMillis(nowMillis)
-        fire(ctx, at, "retry-10min")
-        AuthWorkWiring.progress(ctx, "早上例程：安排 ${MorningAutoLogin.RETRY_INTERVAL_MINUTES} 分钟后的重试（${MorningAutoLogin.hhmm(at)}）")
-        return at
-    }
-
+    // removemorning1：三个「06:00 / +10 分钟」排期入口已删除（用户要求取消每天早上 6:00 的
+    // 定时任务）：三个入口分别是首次 06:00、触发后重排下一天、+10 分钟重试。
+    // 删除它们是「不再有 06:00 闹钟」的**结构性**保证：
+    // 全工程已不存在调用 AlarmManager 排 06:00 的代码路径。
     /**
      * 【logfix1 任务 C 段：探测重试通道】安排一次「探测不确定」的重试闹钟。
      *
      * 用户决策：探测不确定 → 等 **5 分钟**重试，最多 **2 次**（共 3 次探测），全败记日志、不再尝试。
      *
      * 为什么复用本类的闹钟而不新开一套：既有的 [MorningAlarmReceiver] 已经是「时间到了就在后台
-     * 线程跑一段判定链」的成熟通道（goAsync + 后台线程 + 开关守卫 + 让路窗口），
+     * 线程跑一段判定链」的成熟通道（goAsync + 后台线程 + 探测闸门），
      * 探测重试与它**同类**；新开一条通道只会让「到底有几套重试在跑」变得不可读。
+     * （removemorning1：原先提到的「开关守卫 / 让路窗口」已随早上任务一起删除。）
      * 本方法只改变**触发时刻**（5 分钟 vs 10 分钟），触发后的判定链完全同一条。
      */
     fun scheduleProbeRetry(context: Context, atMillis: Long): Long {
@@ -204,6 +168,12 @@ object MorningAuthRuntime {
 
     const val ACTION_MORNING = "top.ytu.srunautologin.action.MORNING_AUTH"
 
+    /**
+     * 探测重试闹钟的 reason 前缀：`scheduleProbeRetry` 用它作为触发来源标记，
+     * [MorningAlarmReceiver] 据此把「探测重试」与「已退役的早上例程（06:00）」区分开。
+     */
+    const val REASON_PROBE_RETRY_PREFIX = "retry-probe"
+
     /** 闹钟 PendingIntent 的请求码（与其它 PendingIntent 不冲突）。 */
     const val REQUEST_CODE = 0x5A11
 
@@ -214,11 +184,14 @@ object MorningAuthRuntime {
 }
 
 /**
- * 【触发点：早上 06:00 / 重试】AlarmManager 回调。
+ * 【触发点：探测不确定 → 5 分钟重试】AlarmManager 回调。
+ *
+ * removemorning1：早上 06:00 首次 + 每 10 分钟重试的早上例程**已按用户要求取消**，
+ * 本接收者现在**只服务**「探测不确定」这条重试通道（见 [ProbeRetryCoordinator]）。
  *
  * 为什么这里用 goAsync() 而不是直接同步跑认证：
- *  `/ 认证是阻塞 IO（可能几十秒），而 AlarmManager 投递的广播跑在**主线程**；
- *  goAsync() 给 10 秒预算，足够完成「轻量在线探测 + 计数判定 + 排下一次闹钟」，
+ *  认证是阻塞 IO（可能几十秒），而 AlarmManager 投递的广播跑在**主线程**；
+ *  goAsync() 给 10 秒预算，足够完成「轻量在线探测 + 闸门判定 + 排期」，
  *  真正的认证请求交给既有 [AuthJobService]（后台线程、可长时间执行）。
  */
 class MorningAlarmReceiver : BroadcastReceiver() {
@@ -256,68 +229,43 @@ class MorningAlarmReceiver : BroadcastReceiver() {
                 "调度：定时闹钟触发（reason=$reason，时刻 ${AuthStatusStore.formatTime(System.currentTimeMillis())}）"
             )
         }
-        if (!MorningAuthRuntime.isEnabled(ctx)) {
-            AuthWorkWiring.progress(ctx, "早上例程($reason)：自动登录已停用 → 直接返回（不排期、不认证）")
-            return
-        }
-        val now = System.currentTimeMillis()
-
-        if (!top.ytu.srunautologin.work.MorningAutoLoginRuntime.inWindow(now)) {
-            AuthWorkWiring.progress(
-                ctx,
-                "早上例程($reason)：当前 ${MorningAutoLogin.hhmm(now)} 不在 06:00–07:00 窗口内 → 只重排下一天"
-            )
-            MorningAuthRuntime.rearmNextDay(ctx, now)
+        // removemorning1（用户要求「取消每天早上 6:00 的状态机和任务闹钟」）：
+        // 早上例程已整体退役 —— 非探测来源的触发一律**不认证、不排期、不重排下一天**。
+        // 兼容处理：升级前已排定的旧 06:00 闹钟仍可能被系统投递，走到这里直接返回即自然失效
+        //（**注意**：这里绝不能重排下一天，否则会复活 06:00 闹钟）。
+        if (!reason.startsWith(MorningAuthRuntime.REASON_PROBE_RETRY_PREFIX)) {
+            AuthWorkWiring.progress(ctx, "定时闹钟($reason)：早上例程已退役（06:00 定时任务已取消）→ 不认证、不重排")
             return
         }
 
-        val store = MorningStateStore(SrunStorage.keyValueStore(ctx))
-        val today = store.loadToday(now)
-        // 超出次数上限：收工（当天不再尝试）
-        if (today.attempts >= MorningAutoLogin.MAX_ATTEMPTS_PER_DAY) {
-            AuthWorkWiring.progress(ctx, "早上例程($reason)：当天已尝试 ${today.attempts} 次 → 收工，重排下一天")
-            MorningAuthRuntime.rearmNextDay(ctx, now)
-            return
-        }
-
-        // A4：轻量探测「是否已处于登录状态」。null = 不确定 → 倾向于尝试认证（服务端会回 already online）
+        // 轻量在线探测（A4）：已在线 → 不重复打 Portal。这是探测重试通道的唯一前置判定
+        //（原「06:00–07:00 窗口 / 当天 7 次上限 / 记账」三段落已随早上任务删除）。
         val online = MorningAuthRuntime.isCurrentlyOnline(ctx)
-        AuthWorkWiring.progress(ctx, "早上例程($reason)：轻量在线探测(NET_CAPABILITY_INTERNET)=$online")
-
+        AuthWorkWiring.progress(ctx, "网络检测($reason)：轻量在线探测(NET_CAPABILITY_INTERNET)=$online")
         if (online == true) {
-            val st = store.recordAttempt(now, "E_ALREADY_ONLINE_CAPABILITY")
-            AuthWorkWiring.progress(
-                ctx,
-                "早上例程：网络已具备互联网能力，判定为「已处于登录状态」→ 不重复认证（当天第 ${st.attempts} 次尝试记账后收工）"
-            )
-            AuthWorkWiring.keyValueStore(ctx).putString(
-                AuthStatusKeys.STATUS_TEXT,
-                "[早上自动登录] ${MorningAutoLogin.hhmm(now)} 网络已在线，未重复认证（已保存账号：待匹配）"
-            )
-            MorningAuthRuntime.rearmNextDay(ctx, now)
+            AuthWorkWiring.progress(ctx, "网络检测($reason)：网络已具备互联网能力 → 不重复认证")
             return
         }
 
-        // 交给既有认证链路（JobScheduler 单通道）：它内部会复用 AuthFlow 的 SSID 匹配跳过逻辑
-        // 【logfix1 任务 C 段】但先过「探测重试闸门」：
+        // 交给既有认证链路（JobScheduler 单通道）：它内部会复用 AuthFlow 的 SSID 匹配跳过逻辑。
+        // 【logfix1 任务 C 段】先过「探测重试闸门」：
         //   ① 距上次探测不足 5 分钟 → 让路（不探测、不认证）；
         //   ② 探测重试额度已用尽（3 次都不确定）→ 记日志、不再尝试。
         // 让路的判断放在**发起认证之前**，否则「闸门」会退化成事后检查，仍然会多发请求。
         val targetSsid = runCatching {
-            AuthWorkWiring.keyValueStore(ctx)
             top.ytu.srunautologin.platform.SrunStorage.wifiAccountMap(ctx).mapping().keys.firstOrNull()
         }.getOrNull()
         val probeGate = ProbeRetryCoordinator.beforeProbe(
             kv = SrunStorage.keyValueStore(ctx),
             ssid = targetSsid,
             probeEnabled = true,
-            nowMillis = now,
+            nowMillis = System.currentTimeMillis(),
             scheduleRetry = { at -> MorningAuthRuntime.scheduleProbeRetry(ctx, at) }
         )
         if (probeGate == ProbeRetryCoordinator.Action.WAIT || probeGate == ProbeRetryCoordinator.Action.GIVE_UP) {
             top.ytu.srunautologin.log.AppLog.record(
                 SrunStorage.keyValueStore(ctx),
-                "调度：早上例程($reason) 探测闸门=$probeGate → 本次不发起登录"
+                "调度：探测重试闹钟($reason) 探测闸门=$probeGate → 本次不发起登录"
             )
             return
         }
@@ -325,15 +273,15 @@ class MorningAlarmReceiver : BroadcastReceiver() {
         val enqueued = try {
             AuthWorkWiring.scheduler(ctx).enqueueAuth(
                 delayMillis = 0L,
-                reason = "morning-$reason"
+                reason = "probe-$reason"
             )
         } catch (e: Throwable) {
-            AuthWorkWiring.progress(ctx, "早上例程：排期失败 ${e.javaClass.simpleName}：${e.message}")
+            AuthWorkWiring.progress(ctx, "网络检测：探测重试排期失败 ${e.javaClass.simpleName}：${e.message}")
             false
         }
         AuthWorkWiring.progress(
             ctx,
-            "早上例程($reason, ${MorningAutoLogin.hhmm(now)})：已交由认证任务排队（enqueued=$enqueued），随后按结果决定是否重试"
+            "网络检测：探测重试($reason) 已交由认证任务排队（enqueued=$enqueued），随后按结果决定是否重试"
         )
     }
 }

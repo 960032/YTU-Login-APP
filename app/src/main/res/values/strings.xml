@@ -91,28 +91,10 @@
     <color name="portal_status_unsaved_text">#FFC62828</color>
     <color name="portal_status_saved_text">#FF2E7D32</color>
 
-    <!-- ================= 元素 11：早上自动登录（morning1 任务）================= -->
-    <!-- 启停开关：**逐字**采用用户要求「点击(启用/停用)自动登录」（半角括号，逐字不改） -->
-    <string name="btn_toggle_auto_login">点击切换自动登录状态</string>
-    <!-- 开关状态行：按钮文案逐字不变，另用一行明确显示当前是启用还是停用 -->
-    <string name="morning_status_enabled">自动登录：已启用（每天 06:00 起每 10 分钟尝试一次，最多 7 次，07:00 截止）</string>
-    <string name="morning_status_disabled">自动登录：已停用（后台任务不会执行）</string>
-    <!-- 权限描述文本：**逐字**采用用户要求 -->
-    <string name="morning_autostart_notice">登录任务需要自启动权限，该权限用于每天早上的自动唤起。</string>
-    <string name="morning_btn_open_autostart">前往系统设置开启自启动</string>
-    <string name="morning_toast_autostart_ok">已跳转到系统的自启动管理页</string>
-    <string name="morning_toast_autostart_fallback">未找到本机机型的「自启动管理」页面，已改为打开应用详情页：请在此页面手动开启「自启动」与「后台弹出界面」</string>
-    <string name="morning_toast_notification_denied">通知被禁用：无法显示工作状态</string>
-    <string name="morning_notification_no_account">（尚未保存账号）</string>
-    <string name="morning_notification_no_ssid">（尚未绑定 WiFi）</string>
-
-    <!-- ================= 常驻通知：标题与内容**逐字**采用用户要求 ================= -->
-    <!-- 标题：自动连接正在工作 -->
-    <string name="morning_notification_title">自动连接正在工作</string>
-    <!-- 内容：已保存登录账号:<账号名>,将登录网络:<网络名>（英文半角逗号；%1$s=账号名、%2$s=网络名） -->
-    <string name="morning_notification_text">已保存登录账号:%1$s,将登录网络:%2$s</string>
-    <string name="morning_channel_name">自动连接</string>
-    <string name="morning_channel_desc">显示自动连接的工作状态</string>
+    <!-- removemorning1（用户要求「取消每天早上 6:00 的状态机和任务闹钟以及相应提示文本」）：
+         元素 11 的 14 条文案已**全部删除**（启停开关 / 开关状态行 / 自启动权限说明与跳转 /
+         自启动与通知提示 / 常驻通知的账号与 SSID 占位 / 通知标题与内容 / 通知渠道名与描述）。
+         删除前已逐条确认无任何引用残留（唯一的引用方 = 被删除的前台服务与元素 11 的控件）。 -->
 
     <!-- ================= 元素 12：账号选择（accountsel1 任务，用户原话）=================
          按钮「账号选择」→ 弹窗标题**逐字**「选择生效账号」；每行：勾选框 → 账户（偏左） → 网络（偏右） → 蓝色「删除」（最右）；

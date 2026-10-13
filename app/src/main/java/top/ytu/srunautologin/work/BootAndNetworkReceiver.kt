@@ -14,57 +14,25 @@ import android.os.Build
  * 引用 Android SDK，本机无 SDK 无法离线编译。
  * =====================================================================================
  *
- * 【触发点 1/3：开机自启】`android.intent.action.BOOT_COMPLETED`。
+ * 【removemorning1（用户要求「关闭开机广播的触发通道」）】
+ *  - 「触发点 1/3：开机自启」**已整块删除**：静态注册的开机广播接收者类、`BOOT_COMPLETED` /
+ *    `LOCKED_BOOT_COMPLETED` / `MY_PACKAGE_REPLACED` 三个 action、以及 `RECEIVE_BOOT_COMPLETED`
+ *    权限全部移除；本文件只剩下面这条「网络变化」触发通道。
  *
- * 注意（Android 7+ 隐式广播限制）：
- *  - `BOOT_COMPLETED`、`LOCKED_BOOT_COMPLETED`、`MY_PACKAGE_REPLACED` 属于**豁免清单**，
- *    可以在 manifest 静态注册；
- *  - `CONNECTIVITY_ACTION` 在 Android 7.0（API 24）起**被移出豁免清单**，静态注册收不到，
+ * 【触发点 2/3：网络变化】（**保留**能力，未受本任务影响）
+ *  - `CONNECTIVITY_ACTION` 在 Android 7.0（API 24）起**被移出隐式广播豁免清单**，静态注册收不到，
  *    必须动态注册 [NetworkChangeReceiver] 或改用 `NetworkCallback` —— 本实现两条都做了：
- *      * 动态注册 [NetworkChangeReceiver]（`registerReceiver` 的 RECEIVER_NOT_EXPORTED）；
- *      * [NetworkWatcher] 用 `ConnectivityManager.registerNetworkCallback` 监听 WiFi 可用性。
+ *     * 动态注册 [NetworkChangeReceiver]（`registerReceiver` 的 RECEIVER_NOT_EXPORTED）；
+ *     * [NetworkWatcher] 用 `ConnectivityManager.registerNetworkCallback` 监听 WiFi 可用性。
  *  - 因此**不依赖** manifest 里的 CONNECTIVITY_ACTION。
  *
- * 【A1 冷启动时序】开机那一刻 WiFi 往往还没连上，所以这里只负责「排期」，
+ * 【A1 冷启动时序】连上 WiFi 那一刻门户往往还没就绪，所以这里只负责「排期」，
  * 真正的「WiFi 没就绪 → 短延迟重试」由 [AuthWorkCoordinator] + [BackoffScheduler] 处理。
  */
-class BootCompletedReceiver : BroadcastReceiver() {
-
-    override fun onReceive(context: Context?, intent: Intent?) {
-        val ctx = context?.applicationContext ?: return
-        val action = intent?.action ?: return
-        if (action != Intent.ACTION_BOOT_COMPLETED &&
-            action != Intent.ACTION_LOCKED_BOOT_COMPLETED &&
-            action != Intent.ACTION_MY_PACKAGE_REPLACED
-        ) {
-            return
-        }
-        AuthWorkWiring.progress(ctx, "trigger: $action")
-
-        // 【C4 覆盖检查：入口 3/7】开机自启 —— 停用时直接返回，不排任何后台任务。
-        if (!MorningAuthRuntime.isEnabled(ctx)) {
-            AuthWorkWiring.progress(ctx, "trigger: $action 但自动登录已停用 → 直接返回")
-            return
-        }
-
-        // 周期保底先注册（15 分钟），再排一次尽快执行的认证：
-        // 开机后用户可能已经连上校园网，也可能还没连上——都交给 AuthFlow 判断。
-        AuthWorkWiring.scheduler(ctx).ensurePeriodic()
-        AuthWorkWiring.scheduler(ctx).enqueueAuth(
-            delayMillis = BOOT_INITIAL_DELAY_MILLIS,
-            reason = "boot"
-        )
-    }
-
-    companion object {
-        /**
-         * 开机后首个认证尝试的短延迟：给系统留出「WiFi 自动连接」的时间窗口。
-         * 30 秒后仍没连上也不判失败——AuthFlow 会返回 E_SKIP_NO_SSID，
-         * 由退避策略安排下一次短延迟复检（A1 冷启动时序）。
-         */
-        const val BOOT_INITIAL_DELAY_MILLIS = 30_000L
-    }
-}
+// removemorning1：原「开机自启接收者」类（整个类，含 companion object 里的
+// BOOT_INITIAL_DELAY_MILLIS = 30_000L 常量）已按用户要求删除。全工程 grep 确认：
+// 该常量与类名在其它文件中**没有任何代码引用**（仅 work/AuthScheduler.kt 的
+// 注释里还剩一处说明性文字，属文档残留，见 fix-report.md 的 A 段与「未改动项」）。
 
 /**
  * 【触发点 2/3：网络变化】动态注册的 `CONNECTIVITY_ACTION` 接收者。
@@ -92,11 +60,10 @@ class NetworkChangeReceiver : BroadcastReceiver() {
             AuthWorkWiring.progress(ctx, "trigger: CONNECTIVITY_ACTION（非 WiFi，忽略）")
             return
         }
-        // 【C4 覆盖检查：入口 4/7】WiFi 连接变化（动态广播）—— 停用时直接返回。
-        if (!MorningAuthRuntime.isEnabled(ctx)) {
-            AuthWorkWiring.progress(ctx, "trigger: CONNECTIVITY_ACTION 但自动登录已停用 → 直接返回")
-            return
-        }
+        // removemorning1：原「启停开关停用 → 直接返回」的闸门已移除。
+        // 依据：开关唯一的界面入口（morning1 的启停按钮）按用户要求删除；而开关默认值是
+        // 停用（MorningStateStore.DEFAULT_ENABLED = false），保留闸门会让这两条**必须保留**
+        // 的网络变化通道在默认配置下全部失效，等于变相「取消全部后台登录」。
         AuthWorkWiring.progress(ctx, "trigger: CONNECTIVITY_ACTION（已连上 WiFi）")
         AuthWorkWiring.scheduler(ctx).enqueueAuth(
             delayMillis = WIFI_CONNECT_SETTLE_MILLIS,
@@ -137,7 +104,8 @@ class NetworkChangeReceiver : BroadcastReceiver() {
  * 比 `CONNECTIVITY_ACTION` 更可靠（不会被隐式广播限制影响），
  * 在「默认网络变成 WiFi」或「WiFi 网络的能力发生变化」时排期一次认证。
  * 注册在 Application.onCreate（应用进程存活期间有效）——进程被杀后由
- * 周期任务 + 开机广播 + 下一次打开应用兜底。
+ * 周期任务（15 分钟 JobScheduler，**保留**）+ 下一次打开应用兜底
+ * （removemorning1：开机广播已按用户要求关闭，不再作为兜底通道）。
  */
 object NetworkWatcher {
 
@@ -161,11 +129,7 @@ object NetworkWatcher {
             .build()
         val callback = object : ConnectivityManager.NetworkCallback() {
             private fun onWifiEvent(what: String) {
-                // 【C4 覆盖检查：入口 5/7】NetworkCallback —— 停用时直接返回。
-                if (!MorningAuthRuntime.isEnabled(ctx)) {
-                    AuthWorkWiring.progress(ctx, "trigger: NetworkCallback($what) 但自动登录已停用 → 直接返回")
-                    return
-                }
+                // removemorning1：启停开关闸门已移除（理由同 NetworkChangeReceiver.onReceive）。
                 AuthWorkWiring.progress(ctx, "trigger: NetworkCallback($what)")
                 AuthWorkWiring.scheduler(ctx).enqueueAuth(
                     delayMillis = NetworkChangeReceiver.WIFI_CONNECT_SETTLE_MILLIS,

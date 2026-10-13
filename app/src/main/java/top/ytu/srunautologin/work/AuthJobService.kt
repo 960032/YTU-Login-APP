@@ -4,6 +4,7 @@ import android.app.job.JobParameters
 import android.app.job.JobService
 import android.content.Context
 import top.ytu.srunautologin.flow.AuthFlow
+import top.ytu.srunautologin.flow.AuthSkipReason
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -38,23 +39,9 @@ class AuthJobService : JobService() {
             )
         }
 
-        // 【A5：与早上例程不冲突 —— 共享计数 + 让路】
-        // 周期兜底（15 分钟）与闹钟链路（6:00 起每 10 分钟）可能撞在同一时刻。
-        // 早上的尝试已经记过账（MorningStateStore，进程间共享），因此：
-        //   ① 正处于 06:00–07:00 且刚刚（<5 分钟）跑过一次 → 本次让路，不再打一次 Portal；
-        //   ② 07:00 之后 → 早上例程当天已收工（闹钟已排到明天），周期兜底恢复原行为。
-        if (periodic && AuthWorkWiring.keyValueStore(this).getString(MorningStateStore.KEY_ENABLED) == "true") {
-            val morningNow = System.currentTimeMillis()
-            if (MorningAutoLoginRuntime.inWindow(morningNow) &&
-                MorningAuthRuntime.isMorningAttemptInFlight(this, morningNow)
-            ) {
-                AuthWorkWiring.progress(
-                    this,
-                    "周期兜底让路：早上例程刚跑过（10 分钟内的尝试已在早上记账里）→ 本次不重复认证"
-                )
-                return false
-            }
-        }
+        // removemorning1：原「周期兜底为早上例程让路」的分支已删除 ——
+        // 早上例程（06:00 首次 + 每 10 分钟重试、每天 7 次）已按用户要求整体取消，
+        // 不再存在「刚跑过的早上尝试」需要让路；周期保底恢复为无条件的 15 分钟通道。
 
         worker.execute {
             // 结果与「是否需要系统重投」解耦，避免把「到上限停止」误当成失败重试
@@ -82,8 +69,28 @@ class AuthJobService : JobService() {
                 when (result.outcome) {
                     // 收工：不再排期（等下一次触发/周期保底）
                     RunOutcome.SUCCESS, RunOutcome.GIVE_UP, RunOutcome.NO_CREDENTIAL, RunOutcome.NO_PERMISSION -> false
+                    // 【Bug C 修复（removemorning1）】零请求跳过必须**再细分**：
+                    RunOutcome.SKIPPED_ZERO_REQUEST -> when (result.code) {
+                        // ① 「服务端返回已在线」（code=E_SKIP_ALREADY_ONLINE）是**成功达成目标**：
+                        //    本次要达成的目标就是「处于已登录状态」，此刻已经满足
+                        //    → **不排任何重试**、直接收工（也不变更任何计数）。
+                        //    修复前它落进下面那条分支 → 排 30 秒重试
+                        //    （用户真机日志：「调度：安排重试（第 3/5 次，延迟 30s，原因 E_SKIP_ALREADY_ONLINE）」）
+                        //    → 反复无意义打 Portal。全链路核查见 fix-report.md 的 C 段。
+                        AuthSkipReason.ALREADY_ONLINE.code -> false
+                        // ② 其它 E_SKIP_*（E_SKIP_NO_SSID / E_SKIP_UNBOUND / E_SKIP_SSID_MISMATCH /
+                        //    E_SKIP_NOT_SRUN / E_SKIP_PROBE_UNCERTAIN）行为**保持不变**：
+                        //    它们确实需要等「网络变化 / 探测闸门」后复检，保留原有短延迟重试。
+                        else -> {
+                            AuthWorkWiring.scheduler(this).enqueueAuth(
+                                delayMillis = result.delaySeconds * 1000L,
+                                reason = "retry-after-${result.code}"
+                            )
+                            false
+                        }
+                    }
                     // 继续重试：由 App 自己的退避策略给出延迟
-                    RunOutcome.RETRY_SCHEDULED, RunOutcome.SKIPPED_ZERO_REQUEST, RunOutcome.WAITING -> {
+                    RunOutcome.RETRY_SCHEDULED, RunOutcome.WAITING -> {
                         AuthWorkWiring.scheduler(this).enqueueAuth(
                             delayMillis = result.delaySeconds * 1000L,
                             reason = "retry-after-${result.code}"

@@ -42,11 +42,8 @@ import top.ytu.srunautologin.net.WifiSnapshotCore
 import top.ytu.srunautologin.platform.AndroidWifiPermissionFlow
 import top.ytu.srunautologin.platform.AndroidWifiSource
 import top.ytu.srunautologin.platform.SrunStorage
-import top.ytu.srunautologin.work.MorningAuthForegroundService.Companion.startMorningNotificationService
-import top.ytu.srunautologin.work.MorningAuthForegroundService.Companion.stopMorningNotificationService
-import top.ytu.srunautologin.work.MorningAuthRuntime
-import top.ytu.srunautologin.work.MorningStateStore
-import top.ytu.srunautologin.work.AndroidAuthScheduler
+// removemorning1：早上任务相关的 5 个 import（前台服务启停扩展 / 早上任务的运行时与状态存储 /
+// JobScheduler 调度器）随「06:00 定时任务 + 启停开关 + 常驻通知」一并移除。
 import top.ytu.srunautologin.storage.AccountStore
 import top.ytu.srunautologin.storage.SavedAccount
 import top.ytu.srunautologin.storage.SecureStoreException
@@ -75,10 +72,8 @@ class MainActivity : Activity() {
     private lateinit var editPassword: EditText
     private lateinit var spinnerCarrier: Spinner
 
-    // 【元素 11（morning1）】早上自动登录的界面控件（由 findViewById 绑到布局里的新控件）
-    private lateinit var btnToggleAutoLogin: Button
-    private lateinit var textMorningStatus: TextView
-    private lateinit var btnOpenAutostartSettings: Button
+    // removemorning1：元素 11 的三个控件字段（启停开关 / 早上状态行 / 自启动跳转按钮）已删除，
+    // 对应控件也从 res/layout/activity_main.xml 中移除。
     private lateinit var editLabel: EditText
     private lateinit var btnUseCurrentWifi: Button
     private lateinit var ssidList: LinearLayout
@@ -188,7 +183,8 @@ class MainActivity : Activity() {
         applyWindowInsetsBeforeContent()
         setContentView(R.layout.activity_main)
 
-        // 说明（crashfix1 任务 A）：setContentView + 下面这 17 个 findViewById **故意留在 try 之外**。
+        // 说明（crashfix1 任务 A）：setContentView + 下面的 findViewById **故意留在 try 之外**
+        //（removemorning1 删掉了元素 11 的 3 个 findViewById，故不再写死数量）。
         // 依据 artifacts/crash-audit1/audit-report.md：布局与 id 已逐个核对匹配，这段调用不依赖权限、
         // 不访问磁盘、不取系统服务，不在「可能抛异常」的清单里；把它们一起包住只会掩盖布局类错误。
         // view-fix1 新增 2 个：scroll_root（滚动根，用于自动滚动）与 text_permission_state（权限状态行）。
@@ -197,10 +193,8 @@ class MainActivity : Activity() {
         editUsername = findViewById(R.id.edit_username)
         editPassword = findViewById(R.id.edit_password)
         spinnerCarrier = findViewById(R.id.spinner_carrier)
-        // 【元素 11】开关 / 状态行 / 自启动跳转按钮
-        btnToggleAutoLogin = findViewById(R.id.btn_toggle_auto_login)
-        textMorningStatus = findViewById(R.id.text_morning_status)
-        btnOpenAutostartSettings = findViewById(R.id.btn_open_autostart_settings)
+        // removemorning1：元素 11 的控件已在布局与代码中删除（详见下方注释）
+        // removemorning1：【元素 11】的三个控件（开关 / 早上状态行 / 自启动跳转）已从布局与代码中删除。
         editLabel = findViewById(R.id.edit_label)
         btnUseCurrentWifi = findViewById(R.id.btn_use_current_wifi)
         ssidList = findViewById(R.id.ssid_list)
@@ -564,10 +558,9 @@ class MainActivity : Activity() {
         }
 
         // 【元素 11】启停开关：点击 → 切换「自动登录启用/停用」→ 持久化 → 起停前台服务与 06:00 闹钟
-        btnToggleAutoLogin.setOnClickListener { toggleAutoLogin() }
+        // removemorning1：启停开关的点击监听已删除（控件与处理函数一并移除）。
 
         // 【元素 11】自启动权限：一键跳转系统「自启动管理」页（失败降级到应用详情页）
-        btnOpenAutostartSettings.setOnClickListener { openAutostartSettings() }
 
         // 元素 6：权限说明流程（严格顺序）
         btnRequestPermission.setOnClickListener {
@@ -1380,10 +1373,7 @@ class MainActivity : Activity() {
             ssidList.addView(tv)
         }
 
-        // 【元素 11】开关状态行：每次 render() 同步刷新，保证「启用/停用」在界面上随时可见
-        textMorningStatus.text = getString(
-            if (MorningAuthRuntime.isEnabled(this)) R.string.morning_status_enabled else R.string.morning_status_disabled
-        )
+        // removemorning1：原【元素 11】的开关状态行刷新已删除（控件已移除）。
 
         // 【uifix2 任务 C-2】Portal 地址常驻状态：每次 render() 都同步刷新
         //（启动 / 保存 Portal 后 / 切换 WiFi / 权限变化……任何一次界面刷新都会带上它）
@@ -1399,97 +1389,10 @@ class MainActivity : Activity() {
      * 注意签名：`TextView.highlightColor` 是 `setHighlightColor(int)`（不是 ColorStateList），
      * 故直接传 ARGB 的 Int；写成 `ColorStateList.valueOf(...)` 会编译失败（已被本机编译器抓出）。
      */
-    /* ==================== 【元素 11（morning1）】早上自动登录：开关 / 自启动 / 通知权限 ==================== */
-
-    /**
-     * 切换「自动登录启用/停用」——**唯一**改变开关状态的地方。
-     *
-     * 启用：① 持久化 enabled=true；② 申请通知权限（API 33+ 未授权时）；③ 启动前台服务（常驻通知）；
-     *      ④ 安排 06:00 精确闹钟。
-     * 停用：① 持久化 enabled=false；② 停止前台服务；③ 取消闹钟；④ 取消全部 JobScheduler 排期
-     *      （**所有后台触发随之停止**：App.onCreate / 开机广播 / 网络变化都在入口处判断开关）。
-     */
-    private fun toggleAutoLogin() {
-        val enable = !MorningAuthRuntime.isEnabled(this)
-        appLog("用户操作：切换自动登录开关 → ${if (enable) "启用" else "停用"}")
-        try {
-            if (enable) {
-                MorningAuthRuntime.setEnabled(this, true)
-                requestNotificationPermissionIfNeeded()
-                if (!startMorningNotificationService()) {
-                    // 前台服务启动被系统拒绝（后台启动限制）→ 明确告知，不静默
-                    toast(getString(R.string.morning_toast_notification_denied))
-                }
-                MorningAuthRuntime.scheduleNextFirst(this)
-                toast(getString(R.string.morning_status_enabled))
-            } else {
-                MorningAuthRuntime.setEnabled(this, false)
-                stopMorningNotificationService()
-                MorningAuthRuntime.cancel(this)
-                AndroidAuthScheduler(this).cancelAll()
-                toast(getString(R.string.morning_status_disabled))
-            }
-        } catch (e: Throwable) {
-            // 开关失败必须可见（不允许「点了没反应」）
-            appLog("用户操作：切换自动登录状态失败（${e.javaClass.simpleName}：${e.message ?: ""}）")
-            toast("切换自动登录失败：" + e.javaClass.simpleName + "：" + (e.message ?: ""))
-        }
-        render()
-    }
-
-    /** API 33+ 的通知权限：未授权则弹系统对话框；32 以下无需该权限（不申请）。 */
-    private fun requestNotificationPermissionIfNeeded() {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return
-        if (Build.VERSION.SDK_INT < 33) return
-        if (checkSelfPermission("android.permission.POST_NOTIFICATIONS") == PackageManager.PERMISSION_GRANTED) return
-        try {
-            requestPermissions(arrayOf("android.permission.POST_NOTIFICATIONS"), REQ_NOTIFICATION)
-        } catch (e: Throwable) {
-            toast(getString(R.string.morning_toast_notification_denied))
-        }
-    }
-
-    /**
-     * 跳转系统「自启动管理」页（用户要求：文案提示 + 一键跳转）。
-     *
-     * 厂商的自启动页是**非公开 Activity**（名字随 ROM 版本变化，Android 也没有统一 API），
-     * 因此这里用「候选清单逐个尝试 + 全部失败降级到应用详情页」：
-     *  - 每个候选单独 try/catch：ActivityNotFoundException / SecurityException / 其它 RuntimeException
-     *    一律**不崩溃**，继续尝试下一个；
-     *  - 全部失败 → 打开 [android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS] 并给出可操作提示。
-     */
-    private fun openAutostartSettings() {
-        val candidates = listOf(
-            // HyperOS / MIUI（本应用用户机型）：安全中心 → 授权管理 → 自启动管理
-            ComponentName("com.miui.securitycenter", "com.miui.permcenter.autostart.AutoStartManagementActivity"),
-            ComponentName("com.miui.securitycenter", "com.miui.powercenter.PowerSettings"),
-            // 其它常见 ROM（同样是非公开页面，可能不存在）
-            ComponentName("com.coloros.safecenter", "com.coloros.safecenter.permission.startup.StartupAppListActivity"),
-            ComponentName("com.vivo.permissionmanager", "com.vivo.permissionmanager.activity.BgStartUpManagerActivity"),
-            ComponentName("com.huawei.systemmanager", "com.huawei.systemmanager.startupmgr.ui.StartupNormalAppListActivity")
-        )
-        for (c in candidates) {
-            try {
-                startActivity(android.content.Intent().setComponent(c).addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK))
-                toast(getString(R.string.morning_toast_autostart_ok))
-                return
-            } catch (e: Throwable) {
-                // 该 ROM 没有这个页面 → 继续尝试下一个；不崩溃、不静默（最终一定会给用户提示）
-            }
-        }
-        // 降级：应用详情页（所有 Android 都有）
-        try {
-            startActivity(
-                android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
-                    .setData(android.net.Uri.parse("package:" + packageName))
-                    .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK)
-            )
-        } catch (e: Throwable) {
-            // 连应用详情页都打不开（极少见）：只提示，不崩溃
-        }
-        toast(getString(R.string.morning_toast_autostart_fallback))
-    }
-
+    // removemorning1：【元素 11（morning1）】整段删除 —— 启停开关处理（切换自动登录 / 申请通知权限）、
+    // 与「自启动说明跳转」一共三个函数连同它们的 KDoc 一并移除；
+    // 本 Activity 不再触碰任何「早上任务」相关的运行时（也不再有通知权限申请入口）。
+    
     private fun applyStateColor(view: TextView, color: Int) {
         view.setTextColor(color)
         view.highlightColor = color
@@ -1502,14 +1405,7 @@ class MainActivity : Activity() {
         grantResults: IntArray
     ) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
-        // 【元素 11（morning1）】POST_NOTIFICATIONS（API 33+ 运行时权限）：被拒 → **明确提示**，
-        // 不能静默——否则用户看不到常驻通知，却以为自动登录没工作。
-        if (requestCode == REQ_NOTIFICATION) {
-            val ok = grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }
-            appLog("用户操作：通知权限 ${if (ok) "已授予" else "被拒绝"}")
-            if (!ok) toast(getString(R.string.morning_toast_notification_denied))
-            return
-        }
+        // removemorning1：原【元素 11】的 POST_NOTIFICATIONS 结果分支已删除（通知权限申请入口已随早上任务移除）。
         if (requestCode != REQ_WIFI) return
         val granted = grantResults.isNotEmpty() &&
             grantResults.all { it == PackageManager.PERMISSION_GRANTED }
@@ -1554,7 +1450,6 @@ class MainActivity : Activity() {
         const val REQ_WIFI = 1001
 
         /** 【元素 11】通知权限（POST_NOTIFICATIONS）的请求码：与 WiFi 权限的请求码必须不同，否则结果回调会串。 */
-        const val REQ_NOTIFICATION = 1002
 
         /** logcat 过滤标签（排查启动闪退：`adb logcat -s SrunAutoLogin`）。 */
         const val TAG = "SrunAutoLogin"
