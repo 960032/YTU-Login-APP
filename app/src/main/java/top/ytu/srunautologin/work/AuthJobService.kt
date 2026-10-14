@@ -28,8 +28,20 @@ class AuthJobService : JobService() {
     override fun onStartJob(params: JobParameters?): Boolean {
         val p = params ?: return false
         val jobId = p.jobId
-        val periodic = jobId == AuthJobs.JOB_ID_PERIODIC
+        // 【dozefix1 任务 A 段】AlarmManager 定期保底通道用**独立的 jobId**
+        // （AndroidAuthScheduler.JOB_ID_PERIODIC_CHECK = 0x5A03，日志里显示为 job-23043），
+        // 但语义与周期任务**完全相同**：periodic=true → 同一套 450s 去抖 + 既有四段判断链，
+        // 认证仍在下面的 worker 后台线程执行。trigger 沿用 TriggerKind.PERIODIC（枚举不扩展，
+        // 两条通道在日志里靠 jobId 与「定期保底闹钟」文案区分）。
+        val periodic = jobId == AuthJobs.JOB_ID_PERIODIC ||
+            jobId == AndroidAuthScheduler.JOB_ID_PERIODIC_CHECK
         val reason = jobIdName(jobId)
+        // 【dozefix1 任务 A 段】任何后台任务被系统唤起时，顺手确保「定期保底闹钟」已排上（幂等）。
+        // 关键：Android 在**重启后会清空 AlarmManager 的全部闹钟**，而 setPersisted(true) 的 JobScheduler
+        // 周期任务会跨重启保留 → 它在开机后第一次被投递时就会在这里把闹钟重新排上
+        // （这就是「手机重启后最多等 15 分钟」的实现路径；开机广播按用户要求仍未恢复）。
+        // 开关停用时 ensurePeriodicCheck 内部会改为「取消且不重排」。失败绝不影响本次认证。
+        runCatching { MorningAuthRuntime.ensurePeriodicCheck(this) }
         AuthWorkWiring.progress(this, "onStartJob: jobId=$jobId reason=$reason")
         // 【logfix1 任务 B 段】调度埋点：JobScheduler 真正唤起了后台任务
         runCatching {

@@ -116,21 +116,185 @@ object MorningAuthRuntime {
         return atMillis
     }
 
-    /** 真正落一次闹钟（两个 API 分支都返回；异常不吞、由调用方 try/catch 兜住）。 */
-    private fun fire(context: Context, atMillis: Long, reason: String) {
+    /**
+     * 真正落一次闹钟（两个 API 分支都返回；异常不吞、由调用方 try/catch 兜住）。
+     *
+     * @param periodicCheck 【dozefix1 新增，带默认值】true = 用**定期保底通道**的 PendingIntent
+     *        （[REQUEST_CODE_PERIODIC_CHECK]）；false = 探测重试通道（[REQUEST_CODE]）。
+     *        两条通道必须用**不同 requestCode**，否则会互相覆盖闹钟（见常量注释）。
+     */
+    private fun fire(context: Context, atMillis: Long, reason: String, periodicCheck: Boolean = false) {
         val am = context.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return
-        val pi = alarmIntent(context, reason)
+        val pi = if (periodicCheck) periodicCheckIntent(context, reason) else alarmIntent(context, reason)
         if (canScheduleExact(context)) {
             am.setExactAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, atMillis, pi)
         } else {
             // 降级：允许在 Doze 下唤醒，但**不保证精确**（系统可能推迟几分钟）。
-            // 明确记录日志，用户排障时能看到「为什么不准时」。
+            // 明确记录日志（两条通道都写），用户排障时能看到「为什么不准时」。
             am.setAndAllowWhileIdle(AlarmManager.RTC_WAKEUP, atMillis, pi)
-            AuthWorkWiring.progress(
-                context,
-                "早上例程：无法精确调度（SCHEDULE_EXACT_ALARM 未授权）→ 降级 setAndAllowWhileIdle，时刻可能被系统推迟"
-            )
+            val msg = "定时闹钟：无法精确调度（SCHEDULE_EXACT_ALARM 未授权）→ 降级 setAndAllowWhileIdle，" +
+                "时刻可能被系统推迟（reason=$reason）"
+            AuthWorkWiring.progress(context, msg)
+            runCatching {
+                top.ytu.srunautologin.log.AppLog.record(
+                    AuthWorkWiring.keyValueStore(context), "调度：$msg"
+                )
+            }
         }
+    }
+
+    /* ========================= 【dozefix1 任务 A 段】定期保底唤窗（AlarmManager，穿透 Doze）=========================
+     * 用户需求（已确认）：把「定期保底唤醒」从 JobScheduler（Doze 下被系统推迟到维护窗口）改为
+     * `AlarmManager.setExactAndAllowWhileIdle`（Doze 下仍会被系统唤醒）。
+     *
+     *  - 间隔 [PERIODIC_CHECK_INTERVAL_MINUTES] = 15 分钟（= [AuthJobs.PERIODIC_INTERVAL_MINUTES]）：
+     *    Doze 下系统对 `setExactAndAllowWhileIdle` 有「每 App 约 9 分钟一次」的限制，15 分钟安全；
+     *  - **自我重排**：每次触发后先排下一次（见 [handlePeriodicCheck] 第 ② 步），
+     *    不依赖 JobScheduler 的周期任务；
+     *  - **幂等**：[ensurePeriodicCheck] 重复调用安全 —— 同 (action, requestCode) ⇒ 同一个 PendingIntent
+     *    ⇒ `setExactAndAllowWhileIdle` **替换**旧闹钟，不会产生多个闹钟；
+     *  - **受开关控制**：[AutoLoginSwitch] 停用 → 取消且不重排、不认证。
+     * ============================================================================================== */
+
+    /** 定期保底闹钟的 reason 前缀（与探测重试的 "retry-probe" 区分开）。 */
+    const val REASON_PERIODIC_PREFIX = "periodic-check"
+
+    /**
+     * 定期保底闹钟的 PendingIntent 请求码。**必须与 [REQUEST_CODE]（探测重试）不同**：
+     * PendingIntent 的相等性只看 `(requestCode, Intent 的 filterEquals)`，**不含 extras** ——
+     * 若两条通道共用同一个 requestCode，它们会互相覆盖对方的闹钟
+     * （排 5 分钟探测重试会顶掉 15 分钟的定期保底，反之亦然）。
+     */
+    const val REQUEST_CODE_PERIODIC_CHECK = 0x5A12
+
+    /** 定期保底间隔（分钟）：直接复用 [AuthJobs.PERIODIC_INTERVAL_MINUTES]，避免两处漂移。 */
+    val PERIODIC_CHECK_INTERVAL_MINUTES: Long = AuthJobs.PERIODIC_INTERVAL_MINUTES.toLong()
+
+    /** 定期保底闹钟专用的 PendingIntent（与探测重试**不同 requestCode** → 互不覆盖）。 */
+    private fun periodicCheckIntent(context: Context, reason: String): PendingIntent {
+        val intent = Intent(context.applicationContext, MorningAlarmReceiver::class.java).apply {
+            action = ACTION_MORNING
+            putExtra(EXTRA_REASON, reason)
+        }
+        var flags = PendingIntent.FLAG_UPDATE_CURRENT
+        if (Build.VERSION.SDK_INT >= 23) flags = flags or PendingIntent.FLAG_IMMUTABLE
+        return PendingIntent.getBroadcast(
+            context.applicationContext, REQUEST_CODE_PERIODIC_CHECK, intent, flags
+        )
+    }
+
+    /**
+     * **确保「定期保底闹钟」已排上（幂等）**；停用 → 取消且**不重排**。
+     *
+     * 三个调用点都用它：[App.onCreate]（App 启动）、[AuthJobService.onStartJob]（任何后台任务被唤起，
+     * 含重启后 JobScheduler 周期任务的补排）、[handlePeriodicCheck]（每 15 分钟的自我重排）。
+     *
+     * @return 调用后是否处于「已排期」状态（false = 已停用并已取消，或排期失败）
+     */
+    fun ensurePeriodicCheck(context: Context): Boolean {
+        val ctx = context.applicationContext
+        val enabled = runCatching {
+            AutoLoginSwitch.isEnabled(AuthWorkWiring.keyValueStore(ctx))
+        }.getOrDefault(false)
+        // 纯逻辑决策（可在 JVM 上复核）：停用 → null（取消，不重排）；启用 → now + 15 分钟
+        val at = AndroidAuthScheduler.nextPeriodicCheckAtOrNull(enabled, System.currentTimeMillis())
+        if (at == null) {
+            cancelPeriodicCheck(ctx, "自动登录已停用（AutoLoginSwitch.isEnabled=false）")
+            return false
+        }
+        return schedulePeriodicCheck(ctx, at, "ensure")
+    }
+
+    /** 真正落一次定期保底闹钟（排期 + 日志）。返回是否成功。 */
+    fun schedulePeriodicCheck(context: Context, atMillis: Long, reason: String): Boolean {
+        val ctx = context.applicationContext
+        return try {
+            fire(ctx, atMillis, "$REASON_PERIODIC_PREFIX-$reason", periodicCheck = true)
+            logAlarm(
+                ctx,
+                "调度：定期保底闹钟(AlarmManager)已排期：下次 ${AuthStatusStore.formatTime(atMillis)}" +
+                    "（间隔 $PERIODIC_CHECK_INTERVAL_MINUTES 分钟，精确=${canScheduleExact(ctx)}，" +
+                    "reason=$reason）"
+            )
+            true
+        } catch (e: Throwable) {
+            logAlarm(
+                ctx,
+                "调度：定期保底闹钟(AlarmManager)排期失败（reason=$reason）：" +
+                    "${e.javaClass.simpleName}: ${e.message}"
+            )
+            false
+        }
+    }
+
+    /** 取消定期保底闹钟（停用时调用；**不重排**、不认证）。返回是否发起了取消。 */
+    fun cancelPeriodicCheck(context: Context, why: String): Boolean {
+        val ctx = context.applicationContext
+        val am = ctx.getSystemService(Context.ALARM_SERVICE) as? AlarmManager ?: return false
+        val ok = runCatching { am.cancel(periodicCheckIntent(ctx, "cancel")); true }.getOrDefault(false)
+        logAlarm(ctx, "调度：定期保底闹钟(AlarmManager)已取消（$why）→ 不重排、不认证")
+        return ok
+    }
+
+    /** 定期保底通道的日志：AppLog（界面「日志」窗口）+ 可读进度，两条都写（都不允许影响闹钟本身）。 */
+    private fun logAlarm(context: Context, line: String) {
+        runCatching {
+            top.ytu.srunautologin.log.AppLog.record(AuthWorkWiring.keyValueStore(context), line)
+        }
+        runCatching { AuthWorkWiring.progress(context, line) }
+    }
+
+    /**
+     * 【定期保底闹钟 · 触发动作】**必须由 [MorningAlarmReceiver] 的后台线程调用**
+     * （`AlarmManager` 投递的广播跑在**主线程**，直接发请求会 NetworkOnMainThreadException）。
+     *
+     * 顺序刻意如此：
+     *  ① 开关停用 → 取消 + 不重排 + 不认证，直接收工；
+     *  ② **先自我重排下一次**（认证可能耗时/失败，绝不能因此丢掉下一次唤醒）；
+     *  ③ 轻量在线探测：已在线 → 不重复打门户；
+     *  ④ 其余 → 入队既有认证链路（periodic 语义 → 450s 去抖 + **既有四段判断链**，不在闹钟里重写认证逻辑）。
+     */
+    fun handlePeriodicCheck(ctx: Context, reason: String) {
+        logAlarm(
+            ctx,
+            "调度：定期保底闹钟(AlarmManager)已触发（reason=$reason，时刻 " +
+                "${AuthStatusStore.formatTime(System.currentTimeMillis())}）"
+        )
+        // ① 开关闸门（与其它后台入口同一处判断）
+        val enabled = runCatching {
+            AutoLoginSwitch.isEnabled(AuthWorkWiring.keyValueStore(ctx))
+        }.getOrDefault(false)
+        if (!enabled) {
+            cancelPeriodicCheck(ctx, "触发时发现自动登录已停用")
+            return
+        }
+        // ② 自我重排下一次（幂等：重复调用只会替换同一个闹钟）
+        schedulePeriodicCheck(
+            ctx,
+            AndroidAuthScheduler.nextPeriodicCheckAt(System.currentTimeMillis()),
+            "self-reschedule"
+        )
+        // ③ 轻量在线探测（只看 NetworkCapabilities，不发 Portal 请求）
+        val online = runCatching { isCurrentlyOnline(ctx) }.getOrNull()
+        if (online == true) {
+            logAlarm(ctx, "调度：定期保底闹钟($reason)：网络已具备互联网能力 → 不重复认证")
+            return
+        }
+        // ④ 交给既有四段判断链（SSID 匹配 → 探测 → 是否已在线 → 认证）
+        val enqueued = try {
+            AuthWorkWiring.scheduler(ctx).enqueuePeriodicCheck(REASON_PERIODIC_PREFIX)
+        } catch (e: Throwable) {
+            logAlarm(
+                ctx,
+                "调度：定期保底闹钟($reason)入队失败：${e.javaClass.simpleName}: ${e.message}"
+            )
+            false
+        }
+        logAlarm(
+            ctx,
+            "调度：定期保底闹钟($reason)已交由既有认证链路（enqueued=$enqueued，" +
+                "periodic 语义 → 去抖 ${AuthWorkWiring.periodicDebounceSeconds()}s）"
+        )
     }
 
     /** 取消全部早上闹钟（用户停用开关时调用）。 */
@@ -233,6 +397,13 @@ class MorningAlarmReceiver : BroadcastReceiver() {
         // 早上例程已整体退役 —— 非探测来源的触发一律**不认证、不排期、不重排下一天**。
         // 兼容处理：升级前已排定的旧 06:00 闹钟仍可能被系统投递，走到这里直接返回即自然失效
         //（**注意**：这里绝不能重排下一天，否则会复活 06:00 闹钟）。
+        // 【dozefix1 任务 A 段】定期保底闹钟（每 15 分钟、setExactAndAllowWhileIdle、穿透 Doze）：
+        // 它由本接收者的**后台线程**处理 —— 先自我重排下一次，再走既有四段判断链（见 handlePeriodicCheck）。
+        if (reason.startsWith(MorningAuthRuntime.REASON_PERIODIC_PREFIX)) {
+            MorningAuthRuntime.handlePeriodicCheck(ctx, reason)
+            return
+        }
+
         if (!reason.startsWith(MorningAuthRuntime.REASON_PROBE_RETRY_PREFIX)) {
             AuthWorkWiring.progress(ctx, "定时闹钟($reason)：早上例程已退役（06:00 定时任务已取消）→ 不认证、不重排")
             return

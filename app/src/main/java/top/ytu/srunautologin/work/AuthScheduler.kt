@@ -214,10 +214,74 @@ class AndroidAuthScheduler(
             .putString(AuthStatusKeys.ATTEMPT_STATE + ".last_schedule", "$reason|$delayMillis")
     }
 
+    /**
+     * 【dozefix1 任务 A 段 · 核心】AlarmManager 定期保底通道的入队：**一次性** JobScheduler 任务，
+     * 但 jobId = [JOB_ID_PERIODIC_CHECK]，在 [AuthJobService] 里与周期任务**同级语义**（periodic=true）
+     * → 同一套 450s 去抖 + 既有四段判断链，认证仍在后台线程执行。
+     *
+     * 为什么由闹钟触发、仍交给 JobScheduler 执行：AlarmManager 投递的广播跑在**主线程**且只有约 10 秒
+     * 预算，而认证是可能几十秒的阻塞 IO（真机崩过 NetworkOnMainThreadException）→
+     * 闹钟只负责「穿透 Doze 叫醒」，真正干活沿用既有的 [AuthJobService] 后台线程。
+     *
+     * 为什么不复用 [AuthJobs.JOB_ID_PERIODIC]：JobScheduler 同 jobId 是**覆盖**语义，
+     * 用它排一次性任务会把 15 分钟周期任务顶掉 → 两条通道就无法并存了（见 B 段的取舍）。
+     */
+    fun enqueuePeriodicCheck(reason: String): Boolean {
+        val scheduler = js ?: return false
+        return try {
+            // 刻意 persisted=false：本任务由闹钟叫醒后**立刻**执行，没有「跨重启保留」的语义；
+            // 重启后的补排由 AuthJobService 里的 MorningAuthRuntime.ensurePeriodicCheck 负责。
+            scheduler.schedule(buildPeriodicCheckInfo(persisted = false))
+            recordSchedule("$reason:ALARM_PERIODIC", 0L)
+            true
+        } catch (e: RuntimeException) {
+            handleScheduleFailure(e, "periodic-check", reason) {
+                scheduler.schedule(buildPeriodicCheckInfo(persisted = false))
+                true
+            }
+        }
+    }
+
+    /** 构造「定期保底闹钟通道」的一次性 [JobInfo]（无最小延迟 = 尽快执行）。 */
+    private fun buildPeriodicCheckInfo(persisted: Boolean): JobInfo =
+        JobInfo.Builder(JOB_ID_PERIODIC_CHECK, AuthJobs.component(appContext))
+            .setRequiredNetworkType(JobInfo.NETWORK_TYPE_ANY)
+            .setPersisted(persisted)
+            .setBackoffCriteria(
+                JobInfo.DEFAULT_INITIAL_BACKOFF_MILLIS,
+                JobInfo.BACKOFF_POLICY_EXPONENTIAL
+            )
+            .build()
+
     companion object {
         const val EXTRA_REASON = "reason"
 
+        /**
+         * 【dozefix1 任务 A 段】AlarmManager 定期保底唤窗通道的一次性任务 id。
+         * 与 [AuthJobs.JOB_ID_PERIODIC] **必须不同**：JobScheduler 同 jobId 会互相覆盖。
+         */
+        const val JOB_ID_PERIODIC_CHECK = 0x5A03
+
         /** 周期任务去抖间隔（秒）：周期保底唤醒时，距上次尝试不足该值则不重复请求。 */
         fun minRetryIntervalSecondsFor(periodicIntervalMinutes: Long): Long =
-            periodicIntervalMinutes.coerceAtLeast(1L) * 60L / 2L    }
+            periodicIntervalMinutes.coerceAtLeast(1L) * 60L / 2L
+
+        /**
+         * 【dozefix1 · 纯逻辑】下一次「定期保底闹钟」的时刻 = now + 间隔（默认 15 分钟）。
+         * 不引用任何 Android API，可在 JVM 上直接复核（见 artifacts/dozefix1/jvm-schedule-test.txt）。
+         */
+        fun nextPeriodicCheckAt(
+            nowMillis: Long,
+            intervalMinutes: Long = AuthJobs.PERIODIC_INTERVAL_MINUTES.toLong()
+        ): Long = nowMillis + intervalMinutes.coerceAtLeast(1L) * 60_000L
+
+        /**
+         * 【dozefix1 · 纯逻辑】定期保底闹钟的**排期决策**（开关联动，可离线复核）：
+         * 停用 → `null`（语义 = 取消，且**不重排**）；启用 → now + 间隔。
+         * 同一输入重复调用结果相同（幂等）——闹钟本身的幂等由「同 requestCode ⇒ 同一 PendingIntent ⇒
+         * `setExactAndAllowWhileIdle` 覆盖旧闹钟」保证。
+         */
+        fun nextPeriodicCheckAtOrNull(enabled: Boolean, nowMillis: Long): Long? =
+            if (enabled) nextPeriodicCheckAt(nowMillis) else null
+    }
 }

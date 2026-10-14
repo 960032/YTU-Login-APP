@@ -37,6 +37,12 @@ class App : Application() {
             // （AutoLoginSwitch.DEFAULT_ENABLED = true），因此保留闸门不再有「默认配置下后台全失效」的风险：
             //   · 启用（默认）→ 下面三条通道照旧全部注册；
             //   · 停用（用户主动点击）→ 直接返回：不注册监听、不排期、不认证（并落一条日志）。
+            // 【dozefix1 任务 A 段】定期保底闹钟（AlarmManager.setExactAndAllowWhileIdle，**穿透 Doze**）：
+            // 幂等确保已排上；**开关停用时它自己会取消且不重排**（开关判断在方法内部）。
+            // 刻意放在下面闸门判断**之前**：这样「停用 → App.onCreate 直接 return」这条路径
+            // 也会先完成「取消闹钟」，不会留下一个仍在跑的旧闹钟。
+            runCatching { top.ytu.srunautologin.work.MorningAuthRuntime.ensurePeriodicCheck(this) }
+
             val switchKv = SrunStorage.keyValueStore(this)
             AutoLoginSwitch.gateReason(switchKv, "App.onCreate")?.let { reason ->
                 AuthWorkWiring.progress(this, reason)
