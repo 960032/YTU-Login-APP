@@ -39,6 +39,7 @@ import top.ytu.srunautologin.work.MorningAuthForegroundService
 import top.ytu.srunautologin.work.startAutoLoginNotification
 import top.ytu.srunautologin.work.stopAutoLoginNotification
 import top.ytu.srunautologin.log.AppLog
+import top.ytu.srunautologin.log.LogExporter
 import top.ytu.srunautologin.net.WifiPermissionPolicy
 import top.ytu.srunautologin.net.WifiPermissionRequestOutcome
 import top.ytu.srunautologin.net.WifiPermissionState
@@ -741,31 +742,63 @@ class MainActivity : Activity() {
              *  - 更新**前**若用户已明显向上翻（落后超过 stickSlackPx）→ **保持原位**，
              *    既不把他拽回底部，也不把他弹到顶部；
              *  - 用 `sv.scrollTo(0, target)`（真正的滚动调用），**不是** `sv.scrollY = target` 属性赋值；
-             *  - 目标位置在 `post`（下一帧）里**重新读一次** scrollY / max 再算，不用更新前捕获的旧值；
              *  - `post` 里先查 `dialogShowing()`：弹窗已关 → 不滚。
              *
-             * 为什么不是「总是滚到底部」：用户正向上翻看历史时每秒被拽回底部，与本次要修的
-             * 「被自动翻到最上端」是同一类打扰（都在抢用户的位置）。为什么默认贴底：
-             * 用户最关心的永远是最新一条日志。
+             * 【logexport1·问题 1/2：本段的修正 —— probefix1 的修法仍会「被拽到顶部」，原因已定位】
+             *  - **问题 1 根因**：probefix1 的 `post` 里写的是
+             *    `val target = if (stayAtBottom) max else sv.scrollY.coerceIn(0, max)`，
+             *    即在**改完文本之后**才重读 `sv.scrollY`。而 `setText` 会让 ScrollView 的子 View
+             *    重新测量（下一帧 relayout），内容替换期间/之后 `scrollY` 会被夹到新范围内甚至**重置为 0**；
+             *    用户上滑停在中间时，`stayAtBottom=false`，于是 `target` 被算成「重读到的 0 或极小值」
+             *    → **页面被拽到顶部**（用户真机症状逐字吻合）。
+             *    **修法**：把 `sv.scrollY` 在**改文本之前**存进局部变量 `anchorY`，`post` 里用 `anchorY`
+             *    （再由 `coerceIn(0, max)` 兜住「内容变短」）；`stayAtBottom` 也在同一时刻（改文本前）判定。
+             *  - **问题 2 根因**：每秒无条件 `body.text = …` 会清空 `TextView` 的文本选择。
+             *    **修法（两道防线，都要）**：① 先比较新旧字符串，**只有内容真的变化**才 `setText`；
+             *    ② `bodyTv.hasSelection()`（`android.widget.TextView.hasSelection()`，API 11+）为 true 时
+             *    **本次完全不改正文 text**（选择保留），只在**标题**追加
+             *    `log_paused_hint`（「（选择中，已暂停刷新）」）作轻量提示；用户取消选择后
+             *    `hasSelection()` 变回 false，下一次 tick 自动恢复刷新（无需任何额外重置动作）。
              */
             fun render(): List<String> {
                 val all = currentLines()
                 val shown = if (all.size > LOG_RENDER_LIMIT) all.subList(all.size - LOG_RENDER_LIMIT, all.size) else all
                 val sv = scrollArea
-                // 只用「更新前」的位置判断用户意图（是否在看最新）；具体滚动位置留到 post 里按新值算。
-                val stayAtBottom = sv == null || isNearBottom(sv, stickSlackPx)
-                headerTv?.text = if (all.size > LOG_RENDER_LIMIT) {
+                val body = bodyTv
+                val userSelecting = body?.hasSelection() == true
+
+                val headerText = if (all.size > LOG_RENDER_LIMIT) {
                     getString(R.string.log_showing_recent, shown.size, all.size)
                 } else {
                     getString(R.string.log_count, all.size)
                 }
-                bodyTv?.text = if (shown.isEmpty()) getString(R.string.log_empty) else shown.joinToString("\n")
-                if (sv != null) {
-                    sv.post {
-                        if (!dialogShowing()) return@post
-                        val max = maxScrollY(sv)
-                        val target = if (stayAtBottom) max else sv.scrollY.coerceIn(0, max)
-                        sv.scrollTo(0, target)
+                // 【logexport1·问题 2】「选择中，已暂停刷新」提示条：只改**标题**（标题不可选中，
+                // 改它不会动到用户正在拖动的选择），正文 text 一个字都不动。
+                val nextHeader = if (userSelecting) headerText + getString(R.string.log_paused_hint) else headerText
+                if (headerTv?.text?.toString() != nextHeader) headerTv?.text = nextHeader
+
+                val nextBody = if (shown.isEmpty()) getString(R.string.log_empty) else shown.joinToString("\n")
+                if (body != null && !userSelecting && body.text?.toString() != nextBody) {
+                    // ① **仅在内容真的变化时**才 setText：没有新日志的 tick 完全不动文本 → 用户的长按选择
+                    //    不会被每秒一次的 setText 顺手清掉（问题 2 的第一道防线）。
+                    // ② **在改文本之前**把当前位置存进局部变量 anchorY：ScrollView 的子 View 重新测量后
+                    //    （内容变长/变短、``setText`` 触发 requestLayout → 下一帧 relayout），
+                    //    滚动位置会被夹到新的内容范围内、甚至被重置为 0。旧代码在 ``post`` 里**重读**
+                    //    ``sv.scrollY``，读到的就是被重置后的值（常常是 0）→ 这正是用户
+                    //    「翻到顶上时仍然会被拽到顶部」的根因（问题 1）。改完文本后再也读不到旧位置，
+                    //    因此必须在这里先存。
+                    val anchorY = sv?.scrollY ?: 0
+                    val stayAtBottom = sv == null || isNearBottom(sv, stickSlackPx)
+                    body.text = nextBody
+                    if (sv != null) {
+                        sv.post {
+                            if (!dialogShowing()) return@post
+                            val max = maxScrollY(sv)
+                            // 用**更新前记录**的 anchorY 恢复位置（不再是重读的 sv.scrollY）；
+                            // 内容变短时 coerceIn 兜底到新的底部。
+                            val target = if (stayAtBottom) max else anchorY.coerceIn(0, max)
+                            sv.scrollTo(0, target)
+                        }
                     }
                 }
                 return all
@@ -793,6 +826,21 @@ class MainActivity : Activity() {
             column.addView(scroll, LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.MATCH_PARENT,
                 (LOG_DIALOG_MAX_HEIGHT_DP * resources.displayMetrics.density).toInt()
+            ))
+
+            // 【logexport1·问题 3】导出入口放在**弹窗内容区**（header 与正文之下、按钮行之上），
+            // 作为内容区里唯一的一行按钮 —— 理由见 fix-report.md §3.2：
+            // AlertDialog 的三个按钮位已分别被「复制全部(positive)/清空(neutral)/取消(negative)」占满，
+            // 框架没有第四个按钮位；若把「复制全部」挪进内容区，会改变已验收的按钮语义与位置
+            // （用户已熟悉的「复制全部」在右下角），代价更大。内容区加按钮**不动任何既有控件**，
+            // 且 `setView` 用的是我们自己的 `LinearLayout`，按钮随内容区一起测量，不存在测量问题。
+            val exportBtn = Button(this).apply {
+                text = getString(R.string.log_export)
+                setOnClickListener { exportLogs() }
+            }
+            column.addView(exportBtn, LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
             ))
 
             // 【理解 1】点「日志」时**先读最新日志再上屏**（show 之前就画好，不会先显示旧内容）。
@@ -855,6 +903,93 @@ class MainActivity : Activity() {
             Log.e(TAG, "复制日志失败", t)
             toast("复制日志失败：" + t.javaClass.simpleName)
         }
+    }
+
+    /**
+     * 【logexport1·问题 3】把**全量**日志导出成 `.md` 文件（用户要求：剪贴板会截断长日志，
+     * 需要「导出 + 告知文件路径」）。
+     *
+     * 保存位置：`getExternalFilesDir(null)` —— App 私有外部目录
+     * （`/storage/emulated/0/Android/data/<包名>/files/`），**不需要任何存储权限**，
+     * 也不需要 `WRITE_EXTERNAL_STORAGE`/`MANAGE_EXTERNAL_STORAGE`（因此不会弹权限框）。
+     *
+     * 【问题 3 的三条硬约束如何满足】
+     *  ① **后台线程 IO**：写文件在 `Thread { … }.start()` 里做（与 `startLoginNow()` 同款写法，
+     *     本任务允许的两选一之一）。真机崩过 `NetworkOnMainThreadException`，主线程禁止阻塞式 IO。
+     *  ② **Toast 告知完整路径**：导出成功后 `runOnUiThread` 回主线程弹两行 Toast ——
+     *     第一行「已导出 N 条日志到文件：」，第二行**逐字完整**的路径
+     *     （长路径单行会被系统截断，故拆两行；辅助行另提示可用文件管理器或电脑查看）。
+     *  ③ **失败可见**：任何异常都不静默 —— `runOnUiThread` 里弹 `log_export_failed` + 异常类名，
+     *     并写 logcat；同时**不修改**日志内容（导出属日志功能自身操作，与「复制」同理不埋点，
+     *     唯一的埋点是失败诊断行，见 [exportLogs] 末尾）。
+     *
+     * 与「复制全部」的关系：**不替换、不移动**。`positive` 仍是「复制全部」（用户已熟悉的位置），
+     * 导出是新增的独立入口。二者都取全量 1000 条，且都不受界面 400 条渲染上限影响。
+     */
+    private fun exportLogs() {
+        try {
+            val all = runCatching { AppLog.list(portalStore) }.getOrDefault(emptyList())
+            if (all.isEmpty()) {
+                toast(getString(R.string.log_export_empty))
+                return
+            }
+            val snapshot = ArrayList(all)   // 后台线程用；写成独立 list，避免与后续写入并发读同一结构
+            val exportedAt = System.currentTimeMillis()
+            val versionCode = appVersionCode()
+            Toast.makeText(this, getString(R.string.log_exporting), Toast.LENGTH_SHORT).show()
+            Thread {
+                try {
+                    // 只在后台线程碰 File IO；Toast / runOnUiThread 是之后的事
+                    val target = File(
+                        getExternalFilesDir(null) ?: File(filesDir, "logs").apply { mkdirs() },
+                        LogExporter.fileName(exportedAt)
+                    )
+                    target.parentFile?.mkdirs()
+                    target.writeText(
+                        LogExporter.buildMarkdown(snapshot, exportedAt, versionCode),
+                        Charsets.UTF_8
+                    )
+                    runOnUiThread {
+                        try {
+                            val (dir, name) = LogExporter.displayPath(target.absolutePath)
+                            Toast.makeText(
+                                this,
+                                getString(R.string.log_export_done, snapshot.size, dir, name),
+                                Toast.LENGTH_LONG
+                            ).show()
+                        } catch (t: Throwable) {
+                            Log.e(TAG, "导出日志提示失败", t)
+                        }
+                    }
+                } catch (t: Throwable) {
+                    // 失败必须可见，绝不静默（用户明确要求）
+                    Log.e(TAG, "导出日志失败", t)
+                    runOnUiThread {
+                        try {
+                            appLog("导出日志失败：" + t.javaClass.simpleName)
+                            toast(getString(R.string.log_export_failed, t.javaClass.simpleName))
+                        } catch (t2: Throwable) {
+                            Log.e(TAG, "导出失败提示也失败了", t2)
+                        }
+                    }
+                }
+            }.start()
+        } catch (t: Throwable) {
+            Log.e(TAG, "导出日志失败（启动阶段）", t)
+            toast(getString(R.string.log_export_failed, t.javaClass.simpleName))
+        }
+    }
+
+    /**
+     * 应用版本号（写进导出文件抬头）。用 `PackageManager` 而不是 `BuildConfig.VERSION_CODE`：
+     * 后者依赖 `buildConfig = true` 的生成开关（本项目未开启 `buildFeatures.buildConfig`），
+     * 直接用会编译不过；`versionCode` 在新 API 上被标 `@Deprecated` 但**仍可用**，且无第三方依赖。
+     * 取不到时返回 0（[LogExporter.buildMarkdown] 会显示「未知」），**绝不因取版本号失败而让导出失败**。
+     */
+    private fun appVersionCode(): Int = try {
+        packageManager.getPackageInfo(packageName, 0).versionCode
+    } catch (t: Throwable) {
+        0
     }
 
     /** 清空日志（带确认框；确认后清空并刷新弹窗内容）。 */

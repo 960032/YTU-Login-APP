@@ -162,4 +162,14 @@
     <!-- 日志窗口只渲染最近 N 条（1000 条一次性渲染会让低端机卡顿），全量仍可通过「复制全部」取到 -->
     <string name="log_showing_recent">当前显示最近 %1$d 条（共 %2$d 条，复制全部可取全量）</string>
     <string name="log_count">共 %1$d 条</string>
+    <!-- ===== logexport1 任务：日志导出为 .md（用户真机反馈「剪贴板会截断长日志」） ===== -->
+    <!-- 导出入口按钮（放在日志弹窗的**内容区**，见 MainActivity.showLogDialog 的理由） -->
+    <string name="log_export">导出为 .md 文件</string>
+    <string name="log_exporting">正在导出日志…</string>
+    <!-- %1$d=条数，%2$s=目录，%3$s=文件名：长路径单行会被系统截断，故拆两行给出**逐字完整**路径 -->
+    <string name="log_export_done">已导出 %1$d 条日志到文件：\n%2$s/%3$s\n（可用文件管理器或电脑查看）</string>
+    <string name="log_export_failed">导出失败：%1$s</string>
+    <string name="log_export_empty">暂无日志可导出</string>
+    <!-- 选择文本期间暂停自动刷新时，追加在日志窗口标题后的轻量提示（不弹窗、不打断） -->
+    <string name="log_paused_hint">（选择中，已暂停刷新）</string>
 </resources>
