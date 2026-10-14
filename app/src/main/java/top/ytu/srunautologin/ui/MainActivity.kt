@@ -420,6 +420,21 @@ class MainActivity : Activity() {
 
     /** 认证链路装配：存储（已冻结）+ WiFi 快照（已冻结）+ 认证客户端 + **Portal 地址（可配置）**。 */
     private fun buildAuthFlow() {
+        // 【netfix1 任务 A/B/C 段】前台「立即登录」也显式绑定 WiFi 网络 + 连接级重试 + 诊断日志。
+        //  为什么：旧写法 `SrunAuthClient()` 用默认引擎 → 跟随**系统默认网络**；校园网未认证时 Android
+        //  判定该 WiFi「无互联网（captive portal）」，默认网络 = 移动数据，连校园网**内网**门户
+        //  （202.194.116.116:80）必然 connect 超时（真机日志 15008ms / SocketTimeoutException）。
+        //  工厂持 applicationContext（不是 this）：它会被 authFlow 长期持有，持 Activity 会泄漏。
+        //  日志：闭包注入（auth/ 是纯逻辑层，不得 import log/AppLog），每行追加一次网络类型描述。
+        val appCtx = applicationContext
+        val wifiFactory = top.ytu.srunautologin.platform.WifiFirstConnectionFactory(appCtx)
+        val connLog: (String) -> Unit = { line ->
+            try {
+                AppLog.record(SrunStorage.keyValueStore(appCtx), "$line | ${wifiFactory.networkDescription()}")
+            } catch (t: Throwable) {
+                // 日志失败必须被吞掉：它是辅助功能，绝不能把认证带崩（沿用 appLog 的纪律）
+            }
+        }
         authFlow = AuthFlow(
             credentials = RepositoryCredentialLookup(SrunStorage.credentialRepository(this)),
             wifiMap = MapWifiAccountLookup(SrunStorage.wifiAccountMap(this)),
@@ -429,7 +444,10 @@ class MainActivity : Activity() {
             wifiSnapshot = CoreWifiSnapshotPort(
                 WifiSnapshotCore(AndroidWifiSource(this), AndroidWifiPermissionFlow(this))
             ),
-            transport = SrunAuthClient(),
+            // 【netfix1 任务 A/B/C 段】engine 显式绑定 WiFi 网络（connectionFactory）+ 连接失败重试 + 诊断日志。
+            transport = SrunAuthClient(
+                engine = HttpUrlConnectionEngine(connectionFactory = wifiFactory, log = connLog)
+            ),
             // 元素 10：Portal 地址来自持久化配置（用户保存值优先，缺失回落 DEFAULT_PORTAL）。
             // 用「工厂函数」而不是在这里直接调用 SrunStorage.keyValueStore(this)：
             // 取值时机推迟到 AuthFlow.run() 真正调用 portal() 时。以工厂函数（而非 lambda 对象）持有
@@ -441,7 +459,10 @@ class MainActivity : Activity() {
         // **线程**：本链路只在「立即登录」的后台线程（startLoginNow 的 Thread）上运行 ——
         // 主线程网络会抛 NetworkOnMainThreadException（AGENTS.md §7 已记录该崩溃）。
         ).withProbeAndLog(
-            probeGate = SrunPortalProbe(HttpUrlConnectionEngine()),
+            // 【netfix1 任务 A/B/C 段】探测端口同样显式绑定 WiFi 网络（真机探测失败即走错网络的症状）。
+            probeGate = SrunPortalProbe(
+                HttpUrlConnectionEngine(connectionFactory = wifiFactory, log = connLog)
+            ),
             probeAttempts = ProbeAttemptStore(portalStore),
             logContext = this
         )

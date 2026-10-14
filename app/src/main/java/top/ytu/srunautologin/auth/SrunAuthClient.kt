@@ -25,22 +25,108 @@ interface LocalIpProbe {
 }
 
 /**
+ * 【netfix1 任务 A 段】连接工厂缝：由实现方决定「**用哪条网络**」打开这个 URL。
+ *
+ * 真机根因（「门户连接失败」）：手机同时具备 WiFi（校园网，未认证）+ 移动数据时，Android 认为该 WiFi
+ * 「无互联网（captive portal）」→ **系统默认网络 = 移动数据**；而 `URL(url).openConnection()` 永远跟随
+ * 系统默认网络，于是发往校园网**内网**门户（如 202.194.116.116:80）的连接被送上移动数据，必然超时
+ * （真机日志：15008ms / SocketTimeoutException；同一地址偶尔 33ms 成功 = 那一刻默认网络恰好是 WiFi）。
+ * 修复 = 注入一个「显式选中 WiFi 的 `Network` 再 openConnection」的实现
+ * （真机实现：`platform/WifiFirstConnectionFactory`）。
+ *
+ * 契约：
+ *  - 返回 null = 「实现方无法选定网络」→ 引擎**回退**到 `URL(url).openConnection()`（旧行为），绝不因此失败；
+ *  - 实现**不得抛异常**（真机实现内部 catch 一切并返回 null）；
+ *  - 本接口与实现位于 `auth` 包（纯 JVM）：**不得 import android**，否则离线核对无法编译。
+ */
+interface ConnectionFactory {
+    fun open(url: URL): java.net.URLConnection?
+}
+
+/**
  * 真机 HTTP 引擎：`java.net.HttpURLConnection`（零第三方依赖）。
  *
  * 不使用 setInstanceFollowRedirects(true) 之外的重定向策略：SRun 门户在未认证时常以 302 跳到自身，
  * 跟随重定向与浏览器行为一致；跟随失败按 IOException 处理。
+ *
+ * 【netfix1 任务 A/B/C 段】新增四个**可选**参数（全部带默认值：既有调用点、离线核对与新参数合成构造均不受影响）：
+ *  - [connectionFactory]：显式网络绑定（默认 null = 系统默认网络 = 旧行为）；
+ *  - [retryCount] / [retryDelayMs] / [attemptTimeoutCapMs]：连接级重试（**只在 IOException 上重试**）；
+ *  - [log]：诊断日志缝（`auth` 层不得 import `log/AppLog`，故用闭包注入；默认为丢弃）。
  */
 class HttpUrlConnectionEngine(
     private val connectTimeoutMs: Int = SrunProtocol.DEFAULT_TIMEOUT_MS,
-    private val readTimeoutMs: Int = SrunProtocol.DEFAULT_TIMEOUT_MS
+    private val readTimeoutMs: Int = SrunProtocol.DEFAULT_TIMEOUT_MS,
+    /** 显式网络绑定（真机 = 选中 WiFi 的 Network）；null = 走系统默认网络（旧行为）。 */
+    private val connectionFactory: ConnectionFactory? = null,
+    /** 连接失败（[IOException]，含 SocketTimeoutException / ConnectException）的**重试**次数，不含首次尝试。 */
+    private val retryCount: Int = DEFAULT_RETRY_COUNT,
+    /** 两次尝试之间的短暂退避（不睡长：失败根因是 connect 超时/拒绝）。 */
+    private val retryDelayMs: Long = DEFAULT_RETRY_DELAY_MS,
+    /** **单次尝试**的 connect/read 超时上限（仅当 retryCount > 0 时生效），保证总耗时可控。 */
+    private val attemptTimeoutCapMs: Int = DEFAULT_ATTEMPT_TIMEOUT_MS,
+    /** 诊断日志缝（一行一条）。默认丢弃；真机装配点注入 `AppLog.record`。 */
+    private val log: (String) -> Unit = {}
 ) : HttpEngine {
 
     override fun get(url: String, timeoutMs: Int): AuthResponse {
-        val conn = (URL(url).openConnection() as HttpURLConnection).apply {
+        val requested = if (timeoutMs > 0) timeoutMs else connectTimeoutMs
+        // 单次尝试超时：有重试时受 attemptTimeoutCapMs 约束（总耗时可控）；无重试时严格保持旧语义。
+        val attemptTimeoutMs = if (retryCount > 0) minOf(requested, attemptTimeoutCapMs) else requested
+        val attempts = retryCount.coerceAtLeast(0) + 1
+        var lastError: IOException? = null
+        for (attempt in 0 until attempts) {
+            try {
+                return attemptGet(url, attemptTimeoutMs)
+            } catch (e: IOException) {
+                // 只有 IOException 会走到这里：HTTP 4xx/5xx 在 attemptGet 里已作为响应返回，不重试。
+                lastError = e
+                log(
+                    "HTTP 连接失败 attempt=${attempt + 1}/$attempts host=${safeHost(url)}" +
+                        " 绑定=${if (connectionFactory != null) "WiFi优先" else "系统默认"}" +
+                        " 单次超时=${attemptTimeoutMs}ms 异常=${e.javaClass.name}" +
+                        " 本地地址=${localAddrOf(e)} 消息=${safeMessage(e)}"
+                )
+                if (attempt + 1 < attempts) {
+                    // 本方法只在后台线程被调用（JobService / 「立即登录」线程 / 探测线程），sleep 可接受。
+                    try {
+                        Thread.sleep(retryDelayMs)
+                    } catch (ie: InterruptedException) {
+                        Thread.currentThread().interrupt() // 恢复中断标记，再按失败上抛（上层分类逻辑不变）
+                        throw e
+                    }
+                }
+            }
+        }
+        val finalError = lastError ?: IOException("连接失败（未知原因）")
+        log(
+            "HTTP 连接最终失败 attempts=$attempts host=${safeHost(url)}" +
+                " 异常=${finalError.javaClass.name} 消息=${safeMessage(finalError)}"
+        )
+        throw finalError
+    }
+
+    /** 单次尝试：**HTTP 响应（含 4xx/5xx）都算成功返回**，只有 IOException 抛出、由 [get] 决定是否重试。 */
+    private fun attemptGet(url: String, attemptTimeoutMs: Int): AuthResponse {
+        val target = URL(url)
+        // 【A 段核心】先让连接工厂显式选网；null（或工厂违约抛异常）→ 回退系统默认网络，保证不比旧版更差。
+        val opened: java.net.URLConnection? = try {
+            connectionFactory?.open(target)
+        } catch (t: Throwable) {
+            log("连接工厂异常，回退系统默认网络：${t.javaClass.name} 消息=${safeMessage(t)}")
+            null
+        }
+        val conn = if (opened is HttpURLConnection) {
+            opened
+        } else {
+            target.openConnection() as HttpURLConnection
+        }
+        conn.apply {
             requestMethod = "GET"
             instanceFollowRedirects = true
-            connectTimeout = if (timeoutMs > 0) timeoutMs else connectTimeoutMs
-            readTimeout = if (timeoutMs > 0) timeoutMs else readTimeoutMs
+            connectTimeout = attemptTimeoutMs
+            // 读超时同样收紧到单次预算内（旧默认 15s 在 3 次尝试下会拖到 45s）。
+            readTimeout = if (readTimeoutMs > 0) minOf(readTimeoutMs, attemptTimeoutMs) else attemptTimeoutMs
             setRequestProperty("Accept", "application/javascript, application/json, text/plain, */*")
             setRequestProperty("User-Agent", "SrunAutoLogin-Android/0.1")
         }
@@ -52,6 +138,50 @@ class HttpUrlConnectionEngine(
         } finally {
             conn.disconnect()
         }
+    }
+
+    /**
+     * 只取 `host[:port]`：**绝不记录 query 串**（`get_challenge` 的 query 里带 username），
+     * 保证日志零账号/零密码泄漏。
+     */
+    private fun safeHost(url: String): String = try {
+        val u = URL(url)
+        if (u.port > 0) "${u.host}:${u.port}" else u.host
+    } catch (t: Throwable) {
+        "?"
+    }
+
+    /** 异常消息单行化 + 截断（日志一行一条，防止异常消息里的换行污染日志）。 */
+    private fun safeMessage(t: Throwable): String =
+        (t.message ?: "").replace('\n', ' ').replace('\r', ' ').take(300)
+
+    /**
+     * 本地 socket 地址：直接取自 JDK 的连接失败消息（真机形如
+     * `failed to connect to /202.194.116.116 (port 80) from /10.94.80.102 (port 58872)`），
+     * **不额外发起任何连接**（零额外开销、零额外超时）。取不到记「未知」。
+     */
+    private fun localAddrOf(t: Throwable): String =
+        LOCAL_ADDR.find(t.message ?: "")?.value ?: "未知"
+
+    companion object {
+        /** 默认重试次数（不含首次尝试）：2 → 最多 3 次尝试。 */
+        const val DEFAULT_RETRY_COUNT: Int = 2
+
+        /** 默认重试间隔：500ms（短暂退避；根因是 connect 超时/拒绝，睡长没有收益）。 */
+        const val DEFAULT_RETRY_DELAY_MS: Long = 500L
+
+        /**
+         * 默认**单次尝试**超时上限：7s。
+         *
+         * 取舍理由：旧行为单次 15s；若沿用 15s，2 次重试的最坏耗时 = 15×3 + 0.5×2 = 46s
+         * （用户点「立即登录」后 46 秒无任何响应，不可接受）。压到 7s 后最坏 = 7×3 + 0.5×2 ≈ 22s，
+         * 与原来单次 15s **同量级**，但给了瞬时抖动 3 次机会。校园网内网门户 RTT 极低
+         * （真机成功案例 33ms），7s 足以区分「需要重试的瞬时失败」与「完全不通」。
+         */
+        const val DEFAULT_ATTEMPT_TIMEOUT_MS: Int = 7_000
+
+        /** 从失败消息里提取本地地址的固定片段：`from /ip (port n)`。 */
+        private val LOCAL_ADDR = Regex("from\\s+/[0-9.]+\\s*\\(port \\d+\\)")
     }
 
     private fun readAll(input: InputStream): String = input.readBytes().toString(Charsets.UTF_8)
