@@ -115,6 +115,28 @@ enum class AuthFailure(val displayName: String) {
      */
     REJECTED("服务端拒绝（密码错误等）"),
     CONFIG_MISSING("配置缺失"),
+
+    /**
+     * 【onlinefix1 任务 A 段】**目标已达成**：当前网络已在线，无需重复登录。
+     *
+     * 与其它取值语义相反 —— 它不是「错误」，而是「本次认证的目标本来就已满足」，因此它的
+     * **displayName 不含「失败」二字**，UI 侧按成功语义展示（`ui/ConfigViewModel.kt` 与
+     * `ui/MainActivity.kt` 统一用 `AuthResultStatus.isAlreadyOnline` 判定，不各写一份 `when`）。
+     *
+     * 来源码 = `E_SKIP_ALREADY_ONLINE`（= `flow.AuthSkipReason.ALREADY_ONLINE.code`；服务端对已登录
+     * 的网络再登录回 `E2620 You are already online.`）。此前没有该取值 → 落
+     * [AuthFailureClassifier] 的 `else` 分支 → 被误报为 [CONFIG_MISSING]（「配置缺失」），
+     * 真机日志逐字为：`「立即登录」结果=未登录（code=E_SKIP_ALREADY_ONLINE，失败分类=配置缺失）`。
+     *
+     * **新增在 `CONFIG_MISSING` 之后（既有取值的名称与相对顺序零改动）**：既有取值可能被离线核对
+     * 断言引用；新增值紧随语义相邻的位置，不追加到末尾是为了让「已在线」与「配置缺失」这对
+     * 真机上互相误报的取值相邻可读。
+     *
+     * **只覆盖 `E_SKIP_ALREADY_ONLINE`**：其它 `E_SKIP_*`（`E_SKIP_NO_SSID` / `E_SKIP_UNBOUND` /
+     * `E_SKIP_SSID_MISMATCH` / `E_SKIP_NOT_SRUN` / `E_SKIP_PROBE_UNCERTAIN`）语义仍是
+     * 「本次跳过、需等条件变化」，**行为保持不变**（负例见 `artifacts/onlinefix1/jvm-classify-test.txt`）。
+     */
+    ALREADY_ONLINE("已在线，无需登录"),
     PARSE_FAILED("响应解析失败"),
     PROTOCOL_ERROR("协议异常"),
     UNKNOWN("未知错误")
@@ -161,6 +183,14 @@ object AuthFailureClassifier {
      * - E_CONFIG            → 配置缺失
      * - E_PARSE             → 响应解析失败
      * - E_CHALLENGE / 服务端业务码（数字 ecode）→ 协议异常 / 业务拒绝
+     * - 【onlinefix1 任务 A 段】E_SKIP_ALREADY_ONLINE → [AuthFailure.ALREADY_ONLINE]（**目标已达成**）
+     *
+     * **为什么必须显式列出 `E_SKIP_ALREADY_ONLINE`**：它不带 `stage`（跳过的 stage 是 `"skip"`），
+     * 落到 `else` 里既不是 LOGIN/VERIFY 也不是已知错误码 → 返回 [AuthFailure.UNKNOWN]；
+     * 真机上它被 UI 的 `failure?.displayName` 显示成「配置缺失」（经 `flow.AuthSkip.toResult`
+     * 的兜底分类），用户看到的就是「失败（配置缺失）」——与真实情况（已在线）完全相反。
+     *
+     * **只加这一条**：其它 `E_SKIP_*` 一律走原路径（行为不变）。
      */
     fun classify(code: String, stage: String): AuthFailure = when (code) {
         AuthCodes.E_NETWORK -> AuthFailure.NETWORK_UNREACHABLE
@@ -168,6 +198,7 @@ object AuthFailureClassifier {
         AuthCodes.E_CONFIG -> AuthFailure.CONFIG_MISSING
         AuthCodes.E_PARSE -> AuthFailure.PARSE_FAILED
         AuthCodes.E_CHALLENGE -> AuthFailure.PROTOCOL_ERROR
+        AuthResultStatus.CODE_ALREADY_ONLINE -> AuthFailure.ALREADY_ONLINE
         else -> if (stage == AuthStage.LOGIN || stage == AuthStage.VERIFY) {
             AuthFailure.REJECTED
         } else {

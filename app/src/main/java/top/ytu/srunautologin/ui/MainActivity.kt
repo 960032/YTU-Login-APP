@@ -445,8 +445,13 @@ class MainActivity : Activity() {
                 WifiSnapshotCore(AndroidWifiSource(this), AndroidWifiPermissionFlow(this))
             ),
             // 【netfix1 任务 A/B/C 段】engine 显式绑定 WiFi 网络（connectionFactory）+ 连接失败重试 + 诊断日志。
+            // 【onlinefix1 任务 B 段】ipProbe 同样绑定 WiFi 网络：netfix1 只覆盖了 HTTP 引擎，
+            // 裸 Socket 的 IP 探测仍走系统默认网络（校园网未认证时 = 移动数据）→ 传给门户的 ip 不准。
             transport = SrunAuthClient(
-                engine = HttpUrlConnectionEngine(connectionFactory = wifiFactory, log = connLog)
+                engine = HttpUrlConnectionEngine(connectionFactory = wifiFactory, log = connLog),
+                ipProbe = top.ytu.srunautologin.auth.SocketLocalIpProbe(
+                    top.ytu.srunautologin.platform.WifiSocketFactoryProvider(appCtx)
+                )
             ),
             // 元素 10：Portal 地址来自持久化配置（用户保存值优先，缺失回落 DEFAULT_PORTAL）。
             // 用「工厂函数」而不是在这里直接调用 SrunStorage.keyValueStore(this)：
@@ -460,8 +465,10 @@ class MainActivity : Activity() {
         // 主线程网络会抛 NetworkOnMainThreadException（AGENTS.md §7 已记录该崩溃）。
         ).withProbeAndLog(
             // 【netfix1 任务 A/B/C 段】探测端口同样显式绑定 WiFi 网络（真机探测失败即走错网络的症状）。
+            // 【onlinefix1 任务 B 段】socketFactory 传入 → 探测的本机 IP 也从 WiFi 网络取（否则 ip= 不准）。
             probeGate = SrunPortalProbe(
-                HttpUrlConnectionEngine(connectionFactory = wifiFactory, log = connLog)
+                HttpUrlConnectionEngine(connectionFactory = wifiFactory, log = connLog),
+                socketFactory = top.ytu.srunautologin.platform.WifiSocketFactoryProvider(appCtx)
             ),
             probeAttempts = ProbeAttemptStore(portalStore),
             logContext = this
@@ -1100,12 +1107,20 @@ class MainActivity : Activity() {
             if (failure == null) {
                 val st = viewModel.state
                 val r = st.lastResult
+                // 【onlinefix1 任务 A 段】三分支：「服务端返回已在线」是**目标已达成**
+                //（不是失败），必须走成功语义的日志，否则用户日志里出现的是
+                // 「结果=未登录（code=E_SKIP_ALREADY_ONLINE，失败分类=配置缺失）」——与事实相反。
+                // 判据统一用 AuthResultStatus.isAlreadyOnline（与 ConfigViewModel.statusOk 同一判据）。
+                val alreadyOnline = top.ytu.srunautologin.auth.AuthResultStatus.isAlreadyOnline(r)
                 appLog(
-                    if (st.statusOk) {
-                        "用户操作：「立即登录」结果=成功（${st.statusText.take(120)}）"
-                    } else {
-                        "用户操作：「立即登录」结果=未登录（code=${r?.code ?: "-"}，" +
-                            "失败分类=${r?.failure?.displayName ?: "-"}）：${st.statusText.take(120)}"
+                    when {
+                        alreadyOnline ->
+                            "用户操作：「立即登录」结果=已在线（无需重复登录）：${st.statusText.take(120)}"
+                        st.statusOk ->
+                            "用户操作：「立即登录」结果=成功（${st.statusText.take(120)}）"
+                        else ->
+                            "用户操作：「立即登录」结果=未登录（code=${r?.code ?: "-"}，" +
+                                "失败分类=${r?.failure?.displayName ?: "-"}）：${st.statusText.take(120)}"
                     }
                 )
                 render()

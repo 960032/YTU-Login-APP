@@ -188,18 +188,69 @@ class HttpUrlConnectionEngine(
 }
 
 /**
+ * 【onlinefix1 任务 B 段】Socket 创建缝：由实现方决定「**用哪条网络**」建这个 TCP 连接。
+ *
+ * **为什么需要它**：[netfix1]（`platform/WifiFirstConnectionFactory`）只给 **HTTP 引擎**绑定了
+ * WiFi 网络，而 [SocketLocalIpProbe] 用的是裸 `Socket()` → 走**系统默认网络**。手机同时具备
+ * WiFi（校园网，未认证）+ 移动数据时，Android 判定该 WiFi「无互联网（captive portal）」→
+ * 默认网络 = 移动数据 → 探测拿到的 `localAddress` 是移动数据侧地址（或根本连不通门户）→
+ * 传给门户的 `ip` 参数不准（真机日志里认证请求带的是 WiFi 地址 `10.94.80.102`）。
+ *
+ * **纯逻辑层不得 import android**：本接口是纯 JVM 抽象（只用 `java.net.Socket`），Android 实现
+ * 放 `platform/WifiSocketFactoryProvider`（复用 `WifiFirstConnectionFactory.selectedWifiNetwork()`）。
+ */
+interface SocketFactoryProvider {
+    /**
+     * 在「指定的网络」上创建一个尚未连接的 [Socket]（调用方负责 connect 与关闭）。
+     *
+     * **绝不抛异常**：拿不到目标网络 / 建 socket 失败一律返回 `null` → 由 [SocketLocalIpProbe]
+     * 回退到旧行为（系统默认网络），修复不允许把「IP 不准」变成「探测崩溃」。
+     */
+    fun createSocket(host: String, port: Int, timeoutMs: Int): Socket?
+}
+
+/**
  * 真实的本机 IP 探测：与 portal 建立 TCP 连接后读取 `Socket.localAddress`，
  * **不硬编码**任何地址，也不依赖外部服务。
+ *
+ * 【onlinefix1 任务 B 段】新增**可选**注入点 [socketFactory]（**带默认值 = 旧行为**，
+ * 构造签名向后兼容：既有 `SocketLocalIpProbe()` 调用点的字节码不变）。传 null（默认）=
+ * 裸 `Socket()` 走系统默认网络，与本段改造前**逐字节等价**。
  */
-class SocketLocalIpProbe : LocalIpProbe {
-    override fun probe(host: String, port: Int, timeoutMs: Int): String? = try {
-        Socket().use { socket ->
-            socket.connect(InetSocketAddress(host, port), if (timeoutMs > 0) timeoutMs else SrunProtocol.DEFAULT_TIMEOUT_MS)
-            socket.localAddress?.hostAddress
+class SocketLocalIpProbe(
+    private val socketFactory: SocketFactoryProvider? = null
+) : LocalIpProbe {
+
+    override fun probe(host: String, port: Int, timeoutMs: Int): String? {
+        val timeout = if (timeoutMs > 0) timeoutMs else SrunProtocol.DEFAULT_TIMEOUT_MS
+        // ① 先试「绑定网络的 socket」（真机 = WiFi）；取不到网络/建不出来 → 返回 null。
+        if (socketFactory != null) {
+            probeOnce(host, port, timeout, bound = true)?.let { return it }
+        }
+        // ② 回退：系统默认网络（旧行为，**永不抛异常**）。
+        return probeOnce(host, port, timeout, bound = false)
+    }
+
+    /**
+     * 一次探测。
+     *
+     * @param bound `false` = 系统默认网络（裸 `Socket()`，旧行为，**永远可用**）；
+     *              `true`  = 通过 [socketFactory] 在选定网络（真机 = WiFi）上建 socket。
+     * **本方法不抛异常**：任何异常（含 SDK 差异导致的 `SecurityException`、工厂返回 null、
+     * connect 失败、DNS 失败）一律返回 null。
+     */
+    private fun probeOnce(host: String, port: Int, timeout: Int, bound: Boolean): String? = try {
+        val socket: Socket? = if (bound) socketFactory?.createSocket(host, port, timeout) else Socket()
+        socket?.use {
+            it.connect(InetSocketAddress(host, port), timeout)
+            it.localAddress?.hostAddress
         }
     } catch (e: IOException) {
         null
     } catch (e: SecurityException) {
+        null
+    } catch (t: Throwable) {
+        // 兜底：SDK 差异（如 Network.getSocketFactory 在个别实现上抛其它异常类型）也不能把探测带崩
         null
     }
 }

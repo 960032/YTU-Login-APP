@@ -393,12 +393,21 @@ class ConfigViewModel(
         return when (outcome) {
             is AuthFlowOutcome.Skipped -> {
                 val result = AuthSkip.toResult(outcome)
+                // 【onlinefix1 任务 A 段】「服务端返回已在线」（code=E_SKIP_ALREADY_ONLINE，
+                // 语义 = AuthSkipReason.ALREADY_ONLINE.code）是**目标已达成**，不是失败：
+                // 它走 Skipped 通道（`ok` 恒为 false），因此这里必须额外判一次 code，
+                // 否则状态区会显示「失败（配置缺失）」并让 MainActivity 打进「结果=未登录」日志
+                //（真机逐字：`失败（配置缺失）：当前 WiFi「Ciallo」已处于登录状态，无需重复登录
+                //  · E_SKIP_ALREADY_ONLINE（阶段 skip，0 ms）`）。
+                // **只对这一码置 true**：其它 E_SKIP_*（无 SSID / 未绑定 / SSID 不匹配 / 非 SRun /
+                // 探测不确定）语义仍是「本次跳过、需等条件变化」，保持 statusOk=false 不变。
+                val alreadyOnline = top.ytu.srunautologin.auth.AuthResultStatus.isAlreadyOnline(result)
                 update {
                     it.copy(
                         lastResult = result,
                         lastAttemptAtMillis = now,
-                        statusOk = false,
-                        statusText = formatStatus(result, now)
+                        statusOk = alreadyOnline,
+                        statusText = formatStatus(result, now, alreadyOnline)
                     )
                 }
             }
@@ -406,8 +415,12 @@ class ConfigViewModel(
                 it.copy(
                     lastResult = outcome.result,
                     lastAttemptAtMillis = now,
-                    statusOk = outcome.result.ok,
-                    statusText = formatStatus(outcome.result, now)
+                    statusOk = outcome.result.ok ||
+                        top.ytu.srunautologin.auth.AuthResultStatus.isAlreadyOnline(outcome.result),
+                    statusText = formatStatus(
+                        outcome.result, now,
+                        top.ytu.srunautologin.auth.AuthResultStatus.isAlreadyOnline(outcome.result)
+                    )
                 )
             }
         }
@@ -439,11 +452,18 @@ class ConfigViewModel(
             return null
         }
 
-        /** 状态区文本格式：`[时间] 成功/失败原因`（失败不静默）。 */
-        fun formatStatus(result: AuthResult, atMillis: Long): String {
+        /**
+         * 状态区文本格式：`[时间] 成功/失败原因`（失败不静默）。
+         *
+         * 【onlinefix1 任务 A 段】新增可选参数 [alreadyOnline]（**默认 false = 既有输出逐字不变**）：
+         * 「已在线，无需重复登录」是**目标已达成**，状态区必须显示正面措辞、**不得出现「失败」二字**
+         * （`AuthFailure.ALREADY_ONLINE.displayName` 已按此措辞给出）。
+         */
+        fun formatStatus(result: AuthResult, atMillis: Long, alreadyOnline: Boolean = false): String {
             val time = formatTime(atMillis)
-            val head = if (result.ok) "成功" else "失败（${result.failure?.displayName ?: result.code}）"
-            val tail = if (result.ok) "" else " · ${result.code}"
+            val ok = result.ok || alreadyOnline
+            val head = if (ok) "成功" else "失败（${result.failure?.displayName ?: result.code}）"
+            val tail = if (ok) "" else " · ${result.code}"
             return "[$time] $head：${result.msg}$tail（阶段 ${result.stage}，${
                 result.elapsedMs
             } ms）"

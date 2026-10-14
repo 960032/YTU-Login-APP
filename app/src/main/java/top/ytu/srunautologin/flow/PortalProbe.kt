@@ -117,8 +117,17 @@ class SrunPortalProbe(
      * 真机实测依据：认证请求（`ip=10.94.80.102`）33ms 返回；探测请求（`ip=` 空串）
      * TCP 连接超时 15s（SocketTimeoutException）。
      */
+    /**
+     * 【onlinefix1 任务 B 段】IP 探测的**建 socket 缝**（默认 null = 旧行为：系统默认网络）。
+     *
+     * 传 null 时行为与改造前**逐字节等价**（[ipProbe] 的默认值此时就是旧的 `SocketLocalIpProbe()`）。
+     * 真机装配点（`ui/MainActivity.kt`、`work/AuthWorkWiring.kt`）把
+     * `platform.WifiSocketFactoryProvider(appContext)` 传进来，使探测也在 **WiFi 网络**上建连接。
+     */
+    socketFactory: top.ytu.srunautologin.auth.SocketFactoryProvider? = null,
+
     private val ipProbe: top.ytu.srunautologin.auth.LocalIpProbe? =
-        top.ytu.srunautologin.auth.SocketLocalIpProbe()
+        top.ytu.srunautologin.auth.SocketLocalIpProbe(socketFactory)
 ) : ProbePort {
 
     override fun probe(portal: String, username: String, ip: String): ProbeResult {
@@ -312,15 +321,22 @@ object SrunProbeClassifier {
             }
             return ProbeResult(
                 ProbeOutcome.NOT_LOGGED_IN,
-                "是 SRun 系统，服务端返回 challenge（长度 ${token.length}）→ 当前未登录",
+                // 【onlinefix1 任务 C 段】措辞去断言（**枚举与语义未改**）：
+                // get_challenge 是认证第一步，**对任何会话都会返回 challenge**，它只能说明
+                // 「是 SRun 系统、且本次响应里没有『已在线』的迹象」，**不能**据此断言「当前未登录」。
+                // 真机反例（用户日志）：探测说「当前未登录」，紧接着 srun_portal 回 `E2620
+                // You are already online.`——真正的登录状态只有第二步才知道。
+                "是 SRun 系统，服务端返回 challenge（长度 ${token.length}）→ 未检测到已登录状态，将尝试认证",
                 httpStatus, error
             )
         }
         val message = SrunResponseReader.messageOf(root)
-        // 有 error 字段但取值不认识：仍属 SRun（它认得我们的 get_challenge 请求），按「未登录」继续登录
+        // 有 error 字段但取值不认识：仍属 SRun（它认得我们的 get_challenge 请求），
+        // 但**登录状态未知** —— 同样不下断言（只说明将尝试认证）。
         return ProbeResult(
             ProbeOutcome.NOT_LOGGED_IN,
-            "是 SRun 系统（error=\"$error\"${if (message.isNullOrBlank()) "" else "，msg=$message"}）→ 按未登录继续",
+            "是 SRun 系统（error=\"$error\"${if (message.isNullOrBlank()) "" else "，msg=$message"}）" +
+                "→ 未检测到已登录状态，将尝试认证",
             httpStatus, error
         )
     }

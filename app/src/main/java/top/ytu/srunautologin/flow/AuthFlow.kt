@@ -391,7 +391,14 @@ class AuthFlow(
                 }
                 ProbeOutcome.NOT_LOGGED_IN -> {
                     probeAttempts?.reset(current)
-                    log("网络检测：WiFi「$current」是 SRun 系统且**未登录**（依据：${probe.evidence}）→ 执行登录（账号 $safeUser）")
+                    // 【onlinefix1 任务 C 段】措辞去断言：get_challenge **对任何会话都会返回 challenge**
+                    //（它是认证第一步，不代表登录状态），因此探测结论只能说「**未检测到已登录状态**」，
+                    // 不能说「未登录」。真机反例（用户日志）逐字：
+                    //   探测：「…是 SRun 系统且**未登录**（依据：服务端返回 challenge（长度 64）→ 当前未登录）」
+                    //   紧接着认证：「服务端返回**已在线**（code=E2620）」
+                    // ——同一秒内两次结论相反，说明前者是**武断断言**。真正的登录状态只有第二步
+                    // `srun_portal` 才知道（由 probeGate 之后的第 6 步覆盖）。
+                    log("网络检测：WiFi「$current」未检测到已登录状态，将尝试认证（依据：${probe.evidence}，账号 $safeUser）")
                 }
             }
         }

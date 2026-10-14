@@ -57,16 +57,25 @@ object AndroidAuthTransportFactory : top.ytu.srunautologin.flow.AuthTransportFac
     fun create(appContext: Context): AuthTransport {
         val factory = top.ytu.srunautologin.platform.WifiFirstConnectionFactory(appContext)
         val kv = SrunStorage.keyValueStore(appContext.applicationContext)
+        // 【onlinefix1 任务 B 段】ipProbe 也必须绑定 WiFi 网络：netfix1 只覆盖了 HTTP 引擎，
+        // 裸 Socket 的本机 IP 探测仍走系统默认网络（校园网未认证时 = 移动数据）→ 传给门户的 ip 不准。
+        // 该实现只持 applicationContext（不引入 Activity 泄漏）。
+        val wifiSockets = top.ytu.srunautologin.platform.WifiSocketFactoryProvider(appContext)
         return SrunAuthClient(
             engine = HttpUrlConnectionEngine(
                 connectionFactory = factory,
                 log = { line -> writeConnectionLog(kv, factory, line) }
             ),
-            ipProbe = SocketLocalIpProbe()
+            ipProbe = SocketLocalIpProbe(wifiSockets)
         )
     }
 
-    /** 旧行为（系统默认网络）：仅为接口与历史调用点保留（新代码请用 [create] 的 Context 重载）。 */
+    /**
+     * 旧行为（系统默认网络）：仅为接口与历史调用点保留（新代码请用 [create] 的 Context 重载）。
+     *
+     * 【onlinefix1 任务 B 段】**刻意保持无绑定**：本重载的契约就是「系统默认网络」，且新增参数
+     * 有默认值 → `SocketLocalIpProbe()` 与改造前逐字节等价。
+     */
     override fun create(): AuthTransport = SrunAuthClient(
         engine = HttpUrlConnectionEngine(),
         ipProbe = SocketLocalIpProbe()
