@@ -26,7 +26,7 @@
     <string name="label_wifi">WiFi 选择</string>
     <string name="btn_use_current_wifi">使用当前连接 wifi</string>
     <!-- uifix2（任务 C-3）：用户逐字要求：原「或手动输入 WiFi 名称」→「输入wifi名称」 -->
-    <string name="hint_new_ssid">输入wifi名称</string>
+    <string name="hint_new_ssid">手动输入网络名称</string>
     <!-- 元素 5b（uifix2 任务 C-1）：用户要求「将选择wifi功能做进弹出窗口，添加可点击的『选择列表』按钮」 -->
     <string name="btn_choose_wifi">选择列表</string>
     <string name="dialog_wifi_title">选择 WiFi</string>
