@@ -143,15 +143,6 @@
             android:layout_marginTop="8dp"
             android:text="@string/btn_save" />
 
-        <!-- 新增分隔线（layout1 任务 D）：保存按钮与权限区域之间的 1dp 视觉分隔 -->
-        <View
-            android:id="@+id/divider_save"
-            android:layout_width="match_parent"
-            android:layout_height="1dp"
-            android:layout_marginTop="10dp"
-            android:layout_marginBottom="10dp"
-            android:background="@color/permission_divider" />
-
         <!-- 说明与状态的间隔：留白 + 细横线，保证「一眼分得清哪行是说明、哪行是状态」 -->
         <View
             android:id="@+id/divider_permission"
@@ -161,34 +152,15 @@
             android:layout_marginBottom="10dp"
             android:background="@color/permission_divider" />
 
-        <!-- 元素 6：权限说明与申请。
-             说明（text_permission_notice）与状态（text_permission_state）拆成两个独立 TextView：
-             说明是固定解释性文案，状态随「已授权 / 未授权 / 降级」变化并**由代码按状态着色**
-             （绿=已授权，红=未授权）。两者之间用一条 1dp 分隔线 + 上下留白隔开，避免糊成一团。 -->
-        <TextView
-            android:id="@+id/text_permission_notice"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:text="@string/permission_not_shown"
-            android:textColor="@color/permission_notice_text" />
-
         <!-- ===== 元素 11（restoretoggle1 恢复）：后台自动登录的「控制开关 + 状态文本」 =====
              位置即 removemorning1 删除前的原位置（保持「与「选择列表」相邻」的原有排布习惯）。
              用户逐字要求：
                 · 按钮文案 =「点击切换自动登录状态」；
-                · 状态文本**在按钮下方（紧邻下一行）**：启用 = 绿色「自动登录已启用」、停用 = 红色「自动登录已停用」。
+                · 状态文本**在按钮上方（紧邻上一行）**：启用 = 绿色「自动登录已启用」、停用 = 红色「自动登录已停用」。
              颜色**由代码按状态设置**（MainActivity.renderAutoLoginStatus → applyStateColor），
              XML 这里只给初始值（默认启用 ⇒ 绿 + 「自动登录已启用」）。
              默认启用 = AutoLoginSwitch.DEFAULT_ENABLED（新键 srun_auto_login_enabled_v1 首次缺省）；
              恢复历史：removemorning1 曾整块删除本元素（当时只要求删「6:00 定时+闹钟」，控件被连带删除）。 -->
-        <Button
-            android:id="@+id/btn_toggle_auto_login"
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="12dp"
-            android:text="@string/btn_toggle_auto_login" />
-
         <TextView
             android:id="@+id/text_auto_login_status"
             android:layout_width="match_parent"
@@ -197,6 +169,13 @@
             android:text="@string/auto_login_status_enabled"
             android:textColor="@color/auto_login_status_enabled_text"
             android:textStyle="bold" />
+
+        <Button
+            android:id="@+id/btn_toggle_auto_login"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:text="@string/btn_toggle_auto_login" />
 
         <TextView
             android:id="@+id/text_permission_state"

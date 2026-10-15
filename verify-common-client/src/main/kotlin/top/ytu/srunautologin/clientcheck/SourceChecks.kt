@@ -323,7 +323,7 @@ object SourceChecks {
             val required = listOf(
                 "edit_username", "edit_password", "spinner_carrier", "edit_label",
                 "btn_use_current_wifi", "ssid_list", "btn_request_permission",
-                "text_permission_notice", "btn_save", "text_status", "btn_login_now"
+                "btn_save", "text_status", "btn_login_now"
             )
             val missing = required.filter { it !in ids }
             r.require(missing.isEmpty(), "布局缺少控件：$missing")

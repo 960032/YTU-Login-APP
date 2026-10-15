@@ -584,7 +584,7 @@ object ClientChecks {
             // 口径：必需元素必须全部在（子集 + 下界），不写死总数——将来合法新增界面元素不应误报。
             // 必需控件 id 以 UiSpec.kt:24-34 的声明与 activity_main.xml 的实际控件 id 为准。
             val ids = UiSpec.ELEMENTS.flatMap { e -> e.viewId.split("/") }.map { it.trim() }.filter { it.isNotEmpty() }.toSet()
-            val mustHaveIds = listOf("edit_username", "edit_password", "spinner_carrier", "edit_label", "ssid_list", "btn_use_current_wifi", "text_permission_notice", "btn_request_permission", "btn_save", "text_status", "btn_login_now")
+            val mustHaveIds = listOf("edit_username", "edit_password", "spinner_carrier", "edit_label", "ssid_list", "btn_use_current_wifi", "btn_request_permission", "btn_save", "text_status", "btn_login_now")
             val missingIds = mustHaveIds.filterNot { it in ids }
             r.require(missingIds.isEmpty(), "缺少必需控件 id：$missingIds（现有：$ids）")
             r.require(UiSpec.ELEMENTS.size >= required.size, "元素数量下限：应 >= 必需项数（${required.size}），实际 ${UiSpec.ELEMENTS.size}")

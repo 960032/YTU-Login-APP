@@ -52,7 +52,7 @@
     <!-- 元素 6 的状态行（与说明分开显示，颜色由代码按状态设置） -->
     <string name="permission_state_unknown">未授权</string>
     <string name="permission_state_granted">已授权</string>
-    <string name="permission_state_denied">WiFi 权限：未授权（需「位置信息」权限）</string>
+    <string name="permission_state_denied">未授权,仅访问当前网络</string>
     <string name="permission_state_degraded_suffix">不完整权限</string>
     <string name="permission_notice_common">该「位置信息」权限用于读取 WiFi 名称（Android 规定 WiFi 名称属于位置信息），以便自动登录到校园网；不同意时仍可登录已连接的 WiFi。</string>
 

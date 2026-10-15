@@ -86,7 +86,6 @@ class MainActivity : Activity() {
     private lateinit var btnUseCurrentWifi: Button
     private lateinit var ssidList: LinearLayout
     private lateinit var scrollRoot: ScrollView
-    private lateinit var textPermissionNotice: TextView
     private lateinit var textPermissionState: TextView
     private lateinit var btnRequestPermission: Button
     private lateinit var btnSave: Button
@@ -207,7 +206,6 @@ class MainActivity : Activity() {
         editLabel = findViewById(R.id.edit_label)
         btnUseCurrentWifi = findViewById(R.id.btn_use_current_wifi)
         ssidList = findViewById(R.id.ssid_list)
-        textPermissionNotice = findViewById(R.id.text_permission_notice)
         textPermissionState = findViewById(R.id.text_permission_state)
         btnRequestPermission = findViewById(R.id.btn_request_permission)
         btnSave = findViewById(R.id.btn_save)
@@ -1513,12 +1511,7 @@ class MainActivity : Activity() {
             Toast.makeText(this, s.statusText, Toast.LENGTH_LONG).show()
         }
 
-        // 元素 6 的「状态行」：与说明严格分开（不同 TextView + 中间分隔线），颜色按状态变化：
-        // 已获得 = 绿（0xFF2E7D32）、未获得 = 红（0xFFC62828），降级时在文案末尾追加「（降级中）」。
-        textPermissionNotice.text = buildString {
-            if (s.rationaleShown) append(s.rationaleText).append('\n')
-            append(s.noticeText)
-        }
+        // 元素 6 权限状态：颜色按状态变化（已获得=绿、未获得=红、降级=琥珀），降级时在文案末尾追加「不完整权限」。
         textPermissionState.text = permissionStateText(s)
         // 颜色**由代码按状态设置**（不是 XML 写死单色）：已获得=绿、未获得=红、降级=琥珀。
         // 降级态（权限被拒但仍能登录当前 WiFi）单列一色，避免它被误读成「已授权」或「完全不可用」。
