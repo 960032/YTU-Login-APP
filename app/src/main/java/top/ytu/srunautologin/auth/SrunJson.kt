@@ -1,36 +1,24 @@
 package top.ytu.srunautologin.auth
 
-/**
- * 极简 JSON 解析器 + JSONP 剥壳（纯 JVM、零第三方依赖、不依赖 Android 的 org.json）。
- *
- * 之所以自写而不依赖 org.json：本包必须在无 Android SDK 的机器上离线编译运行以接受验收；
- * Android 端同样可用（org.json 只是可用选项，不是必须）。
- */
 sealed interface JsonValue {
-    /** JSON 对象；键顺序按出现顺序保留。 */
     data class Obj(val entries: Map<String, JsonValue>) : JsonValue {
         operator fun get(key: String): JsonValue? = entries[key]
         fun keys(): Set<String> = entries.keys
     }
 
-    /** JSON 字符串（已解转义）。 */
     data class Str(val value: String) : JsonValue
 
-    /** JSON 数字（保留原始字面量，便于逐字符比对）。 */
     data class Num(val raw: String) : JsonValue {
         fun toLongOrNull(): Long? = raw.toLongOrNull()
     }
 
-    /** JSON 布尔。 */
     data class Bool(val value: Boolean) : JsonValue
 
     /** JSON null。 */
     data object Null : JsonValue
 
-    /** JSON 数组。 */
     data class Arr(val items: List<JsonValue>) : JsonValue
 
-    /** 便于展示的字符串化：字符串返回值本身，数字/布尔/null 返回字面量，复合结构返回紧凑文本。 */
     fun str(): String? = when (this) {
         is Str -> value
         is Num -> raw
@@ -40,10 +28,10 @@ sealed interface JsonValue {
     }
 }
 
-/** JSON 文本解析器：严格语法 + 中文错误信息，便于诊断。 */
 object SrunJson {
 
     fun parse(text: String): JsonValue {
+        require(text.length <= 262144) { "JSON 响应过长" }
         val p = Parser(text)
         p.skipWs()
         val v = p.parseValue()
@@ -56,6 +44,8 @@ object SrunJson {
 
     private class Parser(private val s: String) {
         var pos = 0
+        private var depth = 0
+        private var nodes = 0
 
         fun atEnd(): Boolean = pos >= s.length
 
@@ -65,7 +55,8 @@ object SrunJson {
 
         fun parseValue(): JsonValue {
             if (atEnd()) err("输入意外结束")
-            return when (val c = s[pos]) {
+            if (++nodes > 10000 || ++depth > 32) err("JSON 结构超过限制")
+            return try { when (val c = s[pos]) {
                 '{' -> parseObject()
                 '[' -> parseArray()
                 '"' -> JsonValue.Str(parseString())
@@ -73,7 +64,7 @@ object SrunJson {
                 'f' -> parseKeyword("false", JsonValue.Bool(false))
                 'n' -> parseKeyword("null", JsonValue.Null)
                 else -> if (c == '-' || c in '0'..'9') parseNumber() else err("非法字符 '$c'")
-            }
+            } } finally { depth-- }
         }
 
         private fun parseObject(): JsonValue.Obj {
@@ -91,6 +82,7 @@ object SrunJson {
                 skipWs()
                 expect(':')
                 skipWs()
+                if (map.containsKey(key)) err("JSON 对象包含重复字段")
                 map[key] = parseValue()
                 skipWs()
                 when (peek()) {
@@ -157,6 +149,7 @@ object SrunJson {
                             else -> err("非法转义 '\\$e'")
                         }
                     }
+                    c < ' ' -> err("JSON 字符串包含控制字符")
                     else -> sb.append(c)
                 }
             }
@@ -176,7 +169,9 @@ object SrunJson {
                 while (!atEnd() && s[pos] in '0'..'9') pos++
             }
             if (pos == start) err("数字字面量为空")
-            return JsonValue.Num(s.substring(start, pos))
+            val raw = s.substring(start, pos)
+            if (!Regex("-?(0|[1-9][0-9]*)(\\.[0-9]+)?([eE][+-]?[0-9]+)?").matches(raw)) err("数字格式无效")
+            return JsonValue.Num(raw)
         }
 
         private fun parseKeyword(word: String, value: JsonValue): JsonValue {
@@ -193,27 +188,18 @@ object SrunJson {
         }
 
         private fun err(message: String): Nothing =
-            throw JsonSyntaxException("$message（位置 $pos，片段：${snippet()}）")
+            throw JsonSyntaxException("$message（位置 $pos）")
 
         private fun snippet(): String =
             s.substring(pos, minOf(s.length, pos + 40)).replace('\n', ' ').replace('\r', ' ')
     }
 }
 
-/**
- * JSONP 剥壳 + 字段读取（纯逻辑）。容错口径逐字对齐参考实现 stripJsonp：
- *  - 允许首尾空白；
- *  - 去掉 UTF-8 BOM（\uFEFF）与 XSSI 前缀 `)]}',`；
- *  - 已是裸 JSON（以 { 或 [ 开头）时原样返回；
- *  - 形如 `callback({...})` / `window.cb({...});` 时取**第一个 '('** 与**最后一个 ')'** 之间的内容；
- *  - 找不到括号时原样返回，交给 JSON 解析器报错。
- */
 object Jsonp {
 
     fun strip(body: String): String {
         var s = body.trim()
         if (s.startsWith("\uFEFF")) s = s.substring(1).trim()
-        // XSSI 前缀：)]}', 或 )]}'
         if (s.startsWith(")]}")) {
             val idx = s.indexOf('\'')
             s = if (idx >= 0) s.substring(idx + 1).trim() else s.substring(4).trim()
@@ -221,13 +207,14 @@ object Jsonp {
         if (s.startsWith("{") || s.startsWith("[")) return s
         val open = s.indexOf('(')
         val close = s.lastIndexOf(')')
-        if (open != -1 && close > open) return s.substring(open + 1, close).trim()
+        if (open != -1 && close > open &&
+            Regex("[A-Za-z_$][A-Za-z0-9_$.]*").matches(s.substring(0, open).trim()) &&
+            s.substring(close + 1).trim() in setOf("", ";")) return s.substring(open + 1, close).trim()
         return s
     }
 
     fun parse(body: String): JsonValue = SrunJson.parse(strip(body))
 
-    /** 安全版：解析失败返回 null（调用方负责转成 E_PARSE）。 */
     fun tryParse(body: String): JsonValue? = try {
         parse(body)
     } catch (e: Exception) {
@@ -235,21 +222,13 @@ object Jsonp {
     }
 }
 
-/**
- * 两个接口响应的字段读取器（纯逻辑）。
- *
- * get_challenge  → challenge / client_ip / error
- * srun_portal    → error / ecode / error_msg / ploy_msg / res / sip / srunacct
- */
 object SrunResponseReader {
 
-    /** 服务端业务码统一取法（参考实现 msgOf / ecode 口径）。 */
     fun errorOf(root: JsonValue.Obj): String? = root["error"]?.str()
 
     fun ecodeOf(root: JsonValue.Obj): String? =
         root["ecode"]?.str() ?: root["error_code"]?.str()
 
-    /** 人读信息：error_msg 优先，其次 ploy_msg（E0000 前缀视为无信息）。 */
     fun messageOf(root: JsonValue.Obj): String? {
         val err = root["error_msg"]?.str()
         if (!err.isNullOrBlank() && err != "ok") return err
@@ -265,6 +244,5 @@ object SrunResponseReader {
         return if (ip.isNullOrEmpty()) null else ip
     }
 
-    /** 业务是否成功：**只认 error == "ok"**。 */
     fun isOk(root: JsonValue.Obj): Boolean = root["error"]?.str() == SrunProtocol.OK
 }

@@ -29,7 +29,7 @@ data class Credential(
 
     /** 日志安全表示：绝不包含 password（防止密码被拼进日志）。 */
     override fun toString(): String =
-        "Credential(label=$label, username=$username, password=***, carrier=$carrier, acId=$acId)"
+        "Credential(label=$label, username=${top.ytu.srunautologin.log.AccountMask.maskAccount(username)}, password=***, carrier=$carrier, acId=$acId)"
 }
 
 /** 登录方式常量与显示名。 */
