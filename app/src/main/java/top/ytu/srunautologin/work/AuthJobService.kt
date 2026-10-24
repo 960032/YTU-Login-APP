@@ -3,191 +3,90 @@ package top.ytu.srunautologin.work
 import android.app.job.JobParameters
 import android.app.job.JobService
 import android.content.Context
-import top.ytu.srunautologin.flow.AuthFlow
-import top.ytu.srunautologin.flow.AuthSkipReason
-import java.util.concurrent.CountDownLatch
+import android.os.Build
+import android.os.Handler
+import android.os.Looper
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
-import java.util.concurrent.TimeUnit
+import java.util.concurrent.Future
+import java.util.concurrent.atomic.AtomicBoolean
+import top.ytu.srunautologin.platform.ActiveWifiSessions
+import top.ytu.srunautologin.platform.SrunStorage
 
-/**
- * ============================ Android 边界层（未验证部分，理由同 AuthScheduler.kt）============
- *
- * 真正的后台执行体：由 [AndroidAuthScheduler] 排期，跑一次 [AuthWorkCoordinator.run]，
- * 按结果决定是否继续退避排期。
- *
- * **不使用前台服务**：前台服务会常驻通知，且 Android 12+（API 31）对后台启动前台服务有硬限制；
- * 认证是秒级任务，JobScheduler 的普通后台任务完全够用（详见 ci-notes.md 的取舍说明）。
- */
+/** Every admitted job is finished once; cancelled work cannot write a late retry. */
 class AuthJobService : JobService() {
-
-    /** 认证是阻塞 IO，放到单线程池执行，避免占用主线程。 */
-    private val worker = Executors.newSingleThreadExecutor { r ->
-        Thread(r, "srun-auth-job").apply { isDaemon = true }
+    private class Task(val parameters: JobParameters) {
+        val cancelled = AtomicBoolean(false)
+        @Volatile var thread: Thread? = null
+        @Volatile var future: Future<*>? = null
+        fun cancel() {
+            cancelled.set(true)
+            thread?.let(ActiveWifiSessions::cancelThread)
+            future?.cancel(true)
+        }
+    }
+    private val tasks = ConcurrentHashMap<Int, Task>()
+    private val main = Handler(Looper.getMainLooper())
+    private val worker = Executors.newSingleThreadExecutor { runnable ->
+        Thread(runnable, "srun-auth-job").apply { isDaemon = true }
     }
 
     override fun onStartJob(params: JobParameters?): Boolean {
-        val p = params ?: return false
-        val jobId = p.jobId
-        // 【dozefix1 任务 A 段】AlarmManager 定期保底通道用**独立的 jobId**
-        // （AndroidAuthScheduler.JOB_ID_PERIODIC_CHECK = 0x5A03，日志里显示为 job-23043），
-        // 但语义与周期任务**完全相同**：periodic=true → 同一套 450s 去抖 + 既有四段判断链，
-        // 认证仍在下面的 worker 后台线程执行。trigger 沿用 TriggerKind.PERIODIC（枚举不扩展，
-        // 两条通道在日志里靠 jobId 与「定期保底闹钟」文案区分）。
-        val periodic = jobId == AuthJobs.JOB_ID_PERIODIC ||
-            jobId == AndroidAuthScheduler.JOB_ID_PERIODIC_CHECK
-        val reason = jobIdName(jobId)
-        // 【dozefix1 任务 A 段】任何后台任务被系统唤起时，顺手确保「定期保底闹钟」已排上（幂等）。
-        // 关键：Android 在**重启后会清空 AlarmManager 的全部闹钟**，而 setPersisted(true) 的 JobScheduler
-        // 周期任务会跨重启保留 → 它在开机后第一次被投递时就会在这里把闹钟重新排上
-        // （这就是「手机重启后最多等 15 分钟」的实现路径；开机广播按用户要求仍未恢复）。
-        // 开关停用时 ensurePeriodicCheck 内部会改为「取消且不重排」。失败绝不影响本次认证。
-        runCatching { MorningAuthRuntime.ensurePeriodicCheck(this) }
-        AuthWorkWiring.progress(this, "onStartJob: jobId=$jobId reason=$reason")
-        // 【logfix1 任务 B 段】调度埋点：JobScheduler 真正唤起了后台任务
-        runCatching {
-            top.ytu.srunautologin.log.AppLog.record(
-                top.ytu.srunautologin.platform.SrunStorage.keyValueStore(this),
-                "调度：JobScheduler 触发后台任务（jobId=$jobId，来源 $reason，periodic=$periodic）"
-            )
-        }
-
-        // restoretoggle1（用户要求）：闸门恢复 —— **停用时周期保底也不执行**（与网络变化通道同口径）。
-        // 位置在 onStartJob 内、两条调度埋点之后：停用就直接收工，不跑认证、不排重试。
-        AutoLoginSwitch.gateReason(
-            top.ytu.srunautologin.platform.SrunStorage.keyValueStore(this),
-            "AuthJobService.onStartJob（periodic=$periodic）"
-        )?.let { reason ->
-            AuthWorkWiring.progress(this, reason)
-            runCatching {
-                top.ytu.srunautologin.log.AppLog.record(
-                    top.ytu.srunautologin.platform.SrunStorage.keyValueStore(this),
-                    "调度：$reason"
-                )
-            }
+        val parameters = params ?: return false
+        if (!AutoLoginSwitch.isEnabled(SrunStorage.keyValueStore(this))) {
+            AuthWorkWiring.progress(this, "调度：自动登录已停用，取消 job=${parameters.jobId}")
             return false
         }
-
-        // removemorning1：原「周期兜底为早上例程让路」的分支已删除 ——
-        // 早上例程（06:00 首次 + 每 10 分钟重试、每天 7 次）已按用户要求整体取消，
-        // 不再存在「刚跑过的早上尝试」需要让路；周期保底恢复为无条件的 15 分钟通道。
-
-        worker.execute {
-            // 结果与「是否需要系统重投」解耦，避免把「到上限停止」误当成失败重试
-            val needSystemRetry = try {
-                val result = AuthWorkWiring.run(
-                    context = this,
-                    trigger = if (periodic) TriggerKind.PERIODIC else TriggerKind.NETWORK,
-                    periodic = periodic
-                )
-                AuthWorkWiring.progress(
-                    this,
-                    "run done: outcome=${result.outcome.wireName} code=${result.code} " +
-                        "attempt=${result.attempt}/${AuthWorkWiring.maxAttempts(this)} " +
-                        "delay=${result.delaySeconds}s"
-                )
-                // 【logfix1 任务 B 段】调度埋点：后台任务收尾（成功/失败/放弃/重试在 AuthWorkCoordinator
-                // 的日志里已有明细，这里只记「本次任务结束 + 是否要系统重投」）
-                runCatching {
-                    top.ytu.srunautologin.log.AppLog.record(
-                        top.ytu.srunautologin.platform.SrunStorage.keyValueStore(this),
-                        "调度：后台任务结束（trigger=${result.trigger.wireName}，outcome=${result.outcome.wireName}，" +
-                            "code=${result.code}，delay=${result.delaySeconds}s）"
-                    )
-                }
-                when (result.outcome) {
-                    // 收工：不再排期（等下一次触发/周期保底）
-                    RunOutcome.SUCCESS, RunOutcome.GIVE_UP, RunOutcome.NO_CREDENTIAL, RunOutcome.NO_PERMISSION -> false
-                    // 【Bug C 修复（removemorning1）】零请求跳过必须**再细分**：
-                    RunOutcome.SKIPPED_ZERO_REQUEST -> when (result.code) {
-                        // ① 「服务端返回已在线」（code=E_SKIP_ALREADY_ONLINE）是**成功达成目标**：
-                        //    本次要达成的目标就是「处于已登录状态」，此刻已经满足
-                        //    → **不排任何重试**、直接收工（也不变更任何计数）。
-                        //    修复前它落进下面那条分支 → 排 30 秒重试
-                        //    （用户真机日志：「调度：安排重试（第 3/5 次，延迟 30s，原因 E_SKIP_ALREADY_ONLINE）」）
-                        //    → 反复无意义打 Portal。全链路核查见 fix-report.md 的 C 段。
-                        AuthSkipReason.ALREADY_ONLINE.code -> false
-                        // ② 其它 E_SKIP_*（E_SKIP_NO_SSID / E_SKIP_UNBOUND / E_SKIP_SSID_MISMATCH /
-                        //    E_SKIP_NOT_SRUN / E_SKIP_PROBE_UNCERTAIN）行为**保持不变**：
-                        //    它们确实需要等「网络变化 / 探测闸门」后复检，保留原有短延迟重试。
-                        else -> {
-                            AuthWorkWiring.scheduler(this).enqueueAuth(
-                                delayMillis = result.delaySeconds * 1000L,
-                                reason = "retry-after-${result.code}"
-                            )
-                            false
-                        }
-                    }
-                    // 继续重试：由 App 自己的退避策略给出延迟
-                    RunOutcome.RETRY_SCHEDULED, RunOutcome.WAITING -> {
-                        AuthWorkWiring.scheduler(this).enqueueAuth(
-                            delayMillis = result.delaySeconds * 1000L,
-                            reason = "retry-after-${result.code}"
-                        )
-                        false
-                    }
-                }
-            } catch (e: Throwable) {
-                // 兜底：任何未预期异常都必须落盘，绝不静默消失
-                AuthWorkWiring.progress(this, "run crashed: ${e.javaClass.name}: ${e.message}")
-                AuthWorkWiring.keyValueStore(this).putString(
-                    AuthStatusKeys.STATUS_TEXT,
-                    "[后台:$reason] 调度异常（${e.javaClass.simpleName}）：${e.message}"
-                )
-                AuthWorkWiring.scheduler(this).enqueueAuth(
-                    delayMillis = AuthWorkWiring.retryPolicy(this).baseDelaySeconds * 1000L,
-                    reason = "crash-retry"
-                )
-                false
+        val task = Task(parameters)
+        tasks.put(parameters.jobId, task)?.cancel()
+        val periodic = parameters.jobId != AuthJobs.JOB_ID_AUTH_ONCE
+        AuthWorkWiring.progress(this, "调度：后台任务开始 job=${parameters.jobId} periodic=$periodic")
+        task.future = worker.submit {
+            task.thread = Thread.currentThread()
+            if (task.cancelled.get()) return@submit
+            val result = try {
+                AuthWorkWiring.run(this, if (periodic) TriggerKind.PERIODIC else TriggerKind.NETWORK, periodic)
+            } catch (e: Exception) {
+                if (!task.cancelled.get()) AuthWorkWiring.progress(this,
+                    "调度：任务执行异常（${e.javaClass.simpleName}），等待下一次网络事件或周期检查")
+                null
             }
-            // 有后台线程在工作 → onStartJob 返回 true，完成时必须调用 jobFinished
-            jobFinished(p, needSystemRetry)
+            main.post {
+                if (!tasks.remove(parameters.jobId, task) || task.cancelled.get()) return@post
+                // Finish first: scheduling the same ID while it is still running cancels it.
+                jobFinished(parameters, false)
+                if (result != null && result.delaySeconds > 0L &&
+                    result.outcome in setOf(RunOutcome.RETRY_SCHEDULED, RunOutcome.WAITING) &&
+                    AutoLoginSwitch.isEnabled(SrunStorage.keyValueStore(this))) {
+                    AuthWorkWiring.scheduler(this).enqueueAuth(result.delaySeconds * 1000L, "retry-${result.code}")
+                }
+            }
         }
+        if (task.cancelled.get()) task.future?.cancel(true)
         return true
     }
 
     override fun onStopJob(params: JobParameters?): Boolean {
-        AuthWorkWiring.progress(this, "onStopJob: jobId=${params?.jobId}（系统抢占；排期已持久化，稍后会重投）")
-        // true = 保留排期让系统稍后重投，避免任务被静默丢弃
-        return true
+        val parameters = params ?: return false
+        tasks.remove(parameters.jobId)?.cancel()
+        AuthWorkWiring.progress(this, "调度：后台任务已取消 job=${parameters.jobId}")
+        val appCancelled = Build.VERSION.SDK_INT >= 31 &&
+            parameters.stopReason == JobParameters.STOP_REASON_CANCELLED_BY_APP
+        return !appCancelled && AutoLoginSwitch.isEnabled(SrunStorage.keyValueStore(this))
+    }
+
+    override fun onDestroy() {
+        tasks.values.forEach(Task::cancel)
+        tasks.clear()
+        worker.shutdownNow()
+        super.onDestroy()
     }
 
     companion object {
-        /**
-         * 同步执行一次认证（供前台「立即登录」复用同一装配，不经过 JobScheduler）。
-         * 超时返回 [RunOutcome.WAITING] 的结果，绝不返回 null。
-         *
-         * @param context 调用方提供的 Context。companion 作用域里既没有 Service 实例，
-         *        也没有静态 applicationContext，所以必须由调用方显式传入（内部只用 applicationContext）。
-         */
+        /** Worker-thread entry point for callers that do not need JobScheduler. */
         fun runInline(context: Context, targetSsid: String?, trigger: TriggerKind): AuthRunResult {
-            val latch = CountDownLatch(1)
-            var out: AuthRunResult? = null
-            val executor = Executors.newSingleThreadExecutor { r ->
-                Thread(r, "srun-auth-inline").apply { isDaemon = true }
-            }
-            executor.execute {
-                try {
-                    out = AuthWorkWiring.run(context, trigger, periodic = false, targetOverride = targetSsid)
-                } catch (e: Throwable) {
-                    AuthWorkWiring.progress(context, "inline run crashed: ${e.javaClass.name}: ${e.message}")
-                } finally {
-                    latch.countDown()
-                }
-            }
-            latch.await(120, TimeUnit.SECONDS)
-            executor.shutdown()
-            return out ?: AuthRunResult(
-                outcome = RunOutcome.WAITING, code = "E_TIMEOUT", message = "前台同步认证等待超时",
-                authOk = false, trigger = trigger, attempt = 0, attemptsConsumed = false,
-                finishedAtMillis = System.currentTimeMillis(), delaySeconds = 0, ranFlow = false,
-                statusLine = ""
-            )
-        }
-
-        private fun jobIdName(jobId: Int): String = when (jobId) {
-            AuthJobs.JOB_ID_PERIODIC -> "periodic"
-            AuthJobs.JOB_ID_AUTH_ONCE -> "auth-once"
-            else -> "job-$jobId"
+            check(Looper.myLooper() != Looper.getMainLooper()) { "认证必须在工作线程执行" }
+            return AuthWorkWiring.run(context, trigger, targetOverride = targetSsid)
         }
     }
 }

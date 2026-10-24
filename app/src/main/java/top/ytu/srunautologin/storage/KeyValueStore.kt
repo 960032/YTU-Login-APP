@@ -2,19 +2,22 @@ package top.ytu.srunautologin.storage
 
 import java.io.File
 
-/**
- * 极简键值存储抽象：把「存到哪」挡在接口后面。
- *
- * - 真机：SharedPreferences 实现（platform 包）；
- * - JVM 测试：内存实现 [InMemoryKeyValueStore] 或文件实现 [FileKeyValueStore]（后者可模拟「重启」）。
- *
- * 本文件为纯 JVM 代码，可离线编译与测试。
- */
 interface KeyValueStore {
     fun getString(key: String): String?
     fun putString(key: String, value: String)
     fun remove(key: String)
     fun keys(): Set<String>
+    fun putAll(changes: Map<String, String?>) {
+        StorageTransactions.withLock { changes.forEach { (key, value) ->
+            if (value == null) remove(key) else putString(key, value)
+        } }
+    }
+}
+
+/** Serializes related reads/writes across repository instances in this process. */
+object StorageTransactions {
+    val monitor = Any()
+    fun <T> withLock(block: () -> T): T = synchronized(monitor) { block() }
 }
 
 class InMemoryKeyValueStore : KeyValueStore {
@@ -26,11 +29,6 @@ class InMemoryKeyValueStore : KeyValueStore {
     override fun toString(): String = "InMemoryKeyValueStore(keys=${map.keys})"
 }
 
-/**
- * 文件实现：每个 key 一个 `<key>.kv` 文件（UTF-8）。
- * 新建实例读同一目录即等价于「进程重启后读同一份持久化数据」。
- * 仅用于离线核对与桌面环境；Android 端不启用。
- */
 class FileKeyValueStore(private val dir: File) : KeyValueStore {
     init {
         if (!dir.exists()) dir.mkdirs()
@@ -68,12 +66,6 @@ class FileKeyValueStore(private val dir: File) : KeyValueStore {
     }
 }
 
-/**
- * 行式文本的转义工具：字段用 '\\t' 分隔、记录用 '\\n' 分隔，
- * 反斜杠、制表符、换行做转义，保证任意 label/密码内容都能无损往返。
- *
- * 注意：转义只发生在**已加密的明文段内部**，不产生明文落盘。
- */
 internal object TextEscaping {
     fun escape(raw: String): String {
         val sb = StringBuilder(raw.length + 8)

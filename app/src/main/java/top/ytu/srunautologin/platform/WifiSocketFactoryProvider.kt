@@ -1,53 +1,52 @@
 package top.ytu.srunautologin.platform
 
 import android.content.Context
-import top.ytu.srunautologin.auth.SocketFactoryProvider
+import java.io.IOException
+import java.net.InetSocketAddress
 import java.net.Socket
+import top.ytu.srunautologin.auth.RequestDeadline
+import top.ytu.srunautologin.auth.SocketFactoryProvider
 
-/**
- * ============================ Android 边界层（本机无 Android 运行时，未离线验证） ============================
- *
- * 【onlinefix1 任务 B 段】在**选定的 WiFi 网络**上创建 Socket 的实现。
- *
- * **为什么需要它**：上一个修复（netfix1）的 [WifiFirstConnectionFactory] 只覆盖了 **HTTP 引擎**；
- * 本机 IP 探测（`auth.SocketLocalIpProbe`）用的是裸 `Socket()` → 走**系统默认网络**。校园网未认证时
- * Android 判定该 WiFi「无互联网（captive portal）」→ 默认网络 = 移动数据 → 探测到的 `localAddress`
- * 不是 WiFi 侧地址（或连不上门户）→ 传给门户的 `ip` 参数不准。
- *
- * **做法**：复用 [WifiFirstConnectionFactory.selectedWifiNetwork] 的选网口径（优先已验证 WiFi，
- * 否则任意 WiFi，否则 activeNetwork 若是 WiFi），再调 `Network.getSocketFactory().createSocket()`
- * —— 与 [WifiFirstConnectionFactory] 用 `Network.openConnection(url)` 是同一套「绑网」语义。
- *
- * **permission**：本类**不需要任何权限**。`getNetworkCapabilities` / `allNetworks` 无需权限；
- * `Network.getSocketFactory()` 属于 ConnectivityManager 的公开 API（API 21+），
- * 也**不读 SSID**、不改任何系统设置。
- *
- * **绝不抛异常**：无 ConnectivityManager / 无 WiFi 网络 / 系统实现差异 / 安全异常
- * 一律返回 null → `SocketLocalIpProbe` 回退到旧行为（系统默认网络）。
- * =========================================================================================================
- */
-class WifiSocketFactoryProvider(context: Context) : SocketFactoryProvider {
+/** DNS and TCP both use the captured network; the returned socket is connected. */
+class WifiSocketFactoryProvider(private val binding: WifiFirstConnectionFactory) : SocketFactoryProvider {
+    constructor(context: Context) : this(WifiFirstConnectionFactory(context))
 
-    /** 只持 **applicationContext**：本对象会被 `auth.SocketLocalIpProbe` 长期持有（持 Activity 会泄漏）。 */
-    private val appContext: Context = context.applicationContext
-
-    /** 选网口径与 HTTP 侧**完全一致**（复用同一个类，避免两份选网逻辑漂移）。 */
-    private val picker = WifiFirstConnectionFactory(appContext)
-
-    override fun createSocket(host: String, port: Int, timeoutMs: Int): Socket? = try {
-        val network = picker.selectedWifiNetwork()
-        if (network == null) {
-            // 拿不到 WiFi 网络（例如只有移动数据 / 系统裁剪 allNetworks）→ null = 走旧行为
-            null
-        } else {
+    override fun createSocket(host: String, port: Int, timeoutMs: Int): Socket {
+        val deadline = RequestDeadline(timeoutMs)
+        val network = binding.requireNetwork()
+        val lookup = try { resolver.submit(java.util.concurrent.Callable { network.getAllByName(host) }) }
+        catch (_: java.util.concurrent.RejectedExecutionException) { throw IOException("DNS 查询繁忙") }
+        val addresses = try { lookup.get(deadline.remainingMs().toLong(), java.util.concurrent.TimeUnit.MILLISECONDS) }
+        catch (_: java.util.concurrent.TimeoutException) { throw java.net.SocketTimeoutException("DNS 查询超时") }
+        catch (_: InterruptedException) {
+            Thread.currentThread().interrupt()
+            throw java.io.InterruptedIOException("认证已取消")
+        } catch (_: java.util.concurrent.ExecutionException) { throw IOException("目标 WiFi DNS 查询失败") }
+        finally { lookup.cancel(true) }
+        var failure: IOException? = null
+        for (address in addresses) {
+            binding.requireNetwork()
             val socket = network.socketFactory.createSocket()
-            // `Socket.connect(host, port, timeout)` 语义与 `Network.getSocketFactory().createSocket(host, port)`
-            // 相同（在本网络上完成 DNS 与 TCP），但**超时可控**，与改造前的探测口径一致。
-            if (timeoutMs > 0) socket.soTimeout = timeoutMs
-            socket
+            binding.trackSocket(socket)
+            try {
+                socket.soTimeout = deadline.remainingMs()
+                socket.connect(InetSocketAddress(address, port), deadline.remainingMs())
+                binding.requireNetwork()
+                return socket
+            } catch (e: IOException) {
+                failure = e
+                socket.close()
+            } catch (e: Exception) {
+                socket.close()
+                throw e
+            }
         }
-    } catch (t: Throwable) {
-        // 修复不允许把「IP 不准」变成「探测崩溃」：任何异常都回退旧行为
-        null
+        throw failure ?: IOException("无法在目标 WiFi 上解析门户地址")
+    }
+    companion object {
+        // A stuck platform DNS call cannot create an unbounded number of threads.
+        private val resolver = java.util.concurrent.ThreadPoolExecutor(0, 2, 30,
+            java.util.concurrent.TimeUnit.SECONDS, java.util.concurrent.SynchronousQueue<Runnable>(),
+            java.util.concurrent.ThreadFactory { runnable -> Thread(runnable, "srun-wifi-dns").apply { isDaemon = true } })
     }
 }

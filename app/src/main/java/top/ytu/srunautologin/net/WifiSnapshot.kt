@@ -97,7 +97,7 @@ class WifiSnapshotCore(
         }
         val bestLevelBySsid = LinkedHashMap<String, Int>()
         for (entry in entries) {
-            val ssid = normalize(entry.ssid) ?: continue
+            val ssid = normalize(entry.ssid, quoted = false) ?: continue
             val old = bestLevelBySsid[ssid]
             if (old == null || entry.level > old) bestLevelBySsid[ssid] = entry.level
         }
@@ -154,10 +154,10 @@ class WifiSnapshotCore(
      * 规则：首尾都是 `"` 则剥掉这一对再 trim；结果为空 → null；等于 [UNKNOWN_SSID] → null
      * （带引号形态剥引号后同样命中）；非 UTF-8 的 hex 串**原样保留**（它是系统给的合法标识，不猜测解码）。
      */
-    private fun normalize(raw: String?): String? {
-        var s = raw?.trim().orEmpty()
-        if (s.length >= 2 && s.first() == '"' && s.last() == '"') {
-            s = s.substring(1, s.length - 1).trim()
+    private fun normalize(raw: String?, quoted: Boolean = true): String? {
+        var s = raw.orEmpty()
+        if (quoted && s.length >= 2 && s.first() == '"' && s.last() == '"') {
+            s = s.substring(1, s.length - 1)
         }
         if (s.isEmpty() || s == UNKNOWN_SSID) return null
         return s

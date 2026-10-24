@@ -172,4 +172,6 @@
     <string name="log_export_empty">暂无日志可导出</string>
     <!-- 选择文本期间暂停自动刷新时，追加在日志窗口标题后的轻量提示（不弹窗、不打断） -->
     <string name="log_paused_hint">（选择中，已暂停刷新）</string>
+    <string name="portal_transport_notice">通过绑定的 WiFi 直接连接门户，优先使用 HTTPS。若学校仅支持 HTTP，请输入完整的 http:// 地址，并确认下方风险后保存。</string>
+    <string name="allow_insecure_http">允许此门户使用 HTTP；链路上的攻击者可能还原账号密码</string>
 </resources>

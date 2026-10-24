@@ -1,177 +1,42 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!--
-  SrunAutoLogin AndroidManifest。
-
-  权限台账（N4/B9：只留必要项）：
-    【removemorning1（用户要求）】已**删除** RECEIVE_BOOT_COMPLETED：
-      用户原话「关闭开机广播的触发通道，取消每天早上 6:00 的状态机和任务闹钟以及相应提示文本」。
-      静态注册的开机广播接收者（BootCompletedReceiver + BOOT_COMPLETED / LOCKED_BOOT_COMPLETED /
-      MY_PACKAGE_REPLACED 三个 action）整块删除；该权限在全工程已无任何使用者（grep 证据见
-      artifacts/removemorning1/fix-report.md 的 A 段）。
-      同时删除 POST_NOTIFICATIONS / FOREGROUND_SERVICE / FOREGROUND_SERVICE_DATA_SYNC
-      （唯一使用者 = 早上任务的常驻通知前台服务，与早上任务一并移除，见 B 段）。
-    既有：
-      - INTERNET / ACCESS_NETWORK_STATE  （认证客户端 + 网络状态判断，上一任务）
-      - ACCESS_WIFI_STATE / CHANGE_WIFI_STATE / ACCESS_FINE_LOCATION / NEARBY_WIFI_DEVICES（WiFi 感知，上一任务）
-  **明确不加**：AccessibilityService（BIND_ACCESSIBILITY_SERVICE）、悬浮窗（SYSTEM_ALERT_WINDOW）、
-  QUERY_ALL_PACKAGES、READ_CALL_LOG / READ_SMS / READ_CONTACTS、POST_NOTIFICATIONS
-  （本版本不发送任何通知，故不申请；理由见 artifacts/android-ci/ci-report.md）。
-  【removemorning1（用户要求）】已**删除** POST_NOTIFICATIONS / FOREGROUND_SERVICE /
-      FOREGROUND_SERVICE_DATA_SYNC：它们的唯一使用者是 morning1 的常驻通知前台服务，
-      而该服务只服务于「每天早上 6:00 的自动登录 + 应用内启停开关」，两者都随本任务移除
-      （判断依据与全工程引用证据见 artifacts/removemorning1/fix-report.md 的 B 段）。
-      「前台服务类型 dataSync」的取舍说明随之作废（不再声明任何前台服务）。
-  【保留 SCHEDULE_EXACT_ALARM】精确闹钟权限**必须保留**：它现在归「探测不确定 → 5 分钟重试」这条
-      闹钟通道使用（work/AuthWorkWiring.kt 的 scheduleRetry → MorningAuthRuntime.scheduleProbeRetry），
-      该通道与本任务无关、按用户要求保留。未授权时降级为 setAndAllowWhileIdle 并记日志，不静默失败。
-
-  明文 HTTP（crashfix1 任务 B）：
-    targetSdk = 36 → Android 9（API 28）起 cleartextTrafficPermitted 默认 false。SRun 门户是纯 http://
-    （无 TLS），**不修则「立即登录」必被系统拦掉**（cleartext HTTP traffic not permitted）。
-    这里**不**用全局 android:usesCleartextTraffic="true"，而用最小范围的 network security config：
-    只放行校内 Portal 的两个目标（见 res/xml/network_security_config.xml），其余保持默认拒绝。
--->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-
-    <!-- restoretoggle1：POST_NOTIFICATIONS / FOREGROUND_SERVICE / FOREGROUND_SERVICE_DATA_SYNC
-         **已恢复**——用户明确要求「恢复常驻通知（方案 A）」，前台服务的三个权限是其最低必要集。 -->
-
-    <!-- ========================= 防误删告警（persistfix1，真机崩溃后补） =========================
-         RECEIVE_BOOT_COMPLETED —— **只**为满足 JobScheduler.setPersisted(true) 的框架要求而保留。
-
-         【为什么必须有这条权限】
-           Android 规定：`JobInfo.Builder.setPersisted(true)`（让排期跨重启保留）**必须**同时持有
-           `android.permission.RECEIVE_BOOT_COMPLETED`，否则 `JobScheduler.schedule()` 直接抛
-           `IllegalArgumentException: Requested job cannot be persisted without holding
-            android.permission.RECEIVE_BOOT_COMPLETED permission`。
-
-         【与开机广播无关 —— 别把这两件事混为一谈】
-           开机广播接收者（BootCompletedReceiver + BOOT_COMPLETED / LOCKED_BOOT_COMPLETED /
-           MY_PACKAGE_REPLACED 三个 action）**仍然保持删除状态**，由 removemorning1 移除、
-           persistfix1 **未恢复**。「开机时不主动跑一次认证」这个行为**没有恢复**。
-           本权限现在的唯一使用者是 work/AuthScheduler.kt 里的三处 setPersisted(true)：
-             - AndroidAuthScheduler.enqueueAuth（一次性认证排期）
-             - AndroidAuthScheduler.enqueueWorkItem（work queue 追加）
-             - AndroidAuthScheduler.ensurePeriodic（15 分钟周期保底）
-           （其余使用者数量 = 0；开机广播通道已无任何代码。）
-
-         【历史教训 —— removemorning1 的疏漏】
-           removemorning1 删权限时，判据是「该权限已无任何使用者」，但 grep 的是**清单声明**，
-           没有核查它被 `setPersisted(true)` **隐式要求**。结果：Android 13 真机上 WiFi 已开启
-           进入 App → NetworkWatcher.onAvailable → enqueueAuth → schedule() 抛异常 → **进程崩溃**。
-           崩溃堆栈与根因复核见 artifacts/persistfix1/fix-report.md。
-
-         【禁止事项】
-           若将来要删除本权限，**必须先**把 AuthScheduler 里的 setPersisted(true) 一并去掉
-           （或改为 setPersisted(false)），否则会**复现本次崩溃**。
-           现在 AuthScheduler 已有 IllegalArgumentException 兜底 + 不持久化降级，
-           删权限不再等于「必崩」，但会静默丢掉「重启后自动恢复排期」的能力。
-         ============================================================================================ -->
-    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
-
-    <!-- 保留：SCHEDULE_EXACT_ALARM —— 现在归「探测不确定 → 5 分钟重试」的精确闹钟通道使用 -->
-    <uses-permission android:name="android.permission.SCHEDULE_EXACT_ALARM" />
-
-    <!-- restoretoggle1（用户要求「恢复常驻通知，方案 A」）：前台服务 + 通知权限**恢复**
-         （removemorning1 曾随早上任务一并删除）。三条权限的用途都是常驻通知前台服务：
-           POST_NOTIFICATIONS          → API 33+ 显示通知必须的运行时权限（被拒时降级：后台任务照常，通知不显示）
-           FOREGROUND_SERVICE          → API 28+ 使用前台服务的通用权限
-           FOREGROUND_SERVICE_DATA_SYNC→ API 34+ 的「类型权限」，与 manifest 里 foregroundServiceType="dataSync" 配对 -->
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
-
-    <!-- 既有：联网与网络状态 -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-
-    <!-- 既有：WiFi 感知层（net/ + platform/ 包） -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
-    <uses-permission
-        android:name="android.permission.NEARBY_WIFI_DEVICES"
-        android:usesPermissionFlags="neverForLocation" />
-
-    <application
-        android:name="top.ytu.srunautologin.App"
-        android:allowBackup="false"
-        android:icon="@mipmap/ic_launcher"
-        android:label="@string/app_name"
+    <uses-permission android:name="android.permission.NEARBY_WIFI_DEVICES" android:usesPermissionFlags="neverForLocation" />
+    <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_SPECIAL_USE" />
+    <application android:name="top.ytu.srunautologin.App"
+        android:allowBackup="false" android:dataExtractionRules="@xml/data_extraction_rules" android:icon="@mipmap/ic_launcher"
+        android:roundIcon="@mipmap/ic_launcher" android:label="@string/app_name"
         android:networkSecurityConfig="@xml/network_security_config"
-        android:roundIcon="@mipmap/ic_launcher"
-        android:supportsRtl="true"
-        android:theme="@style/AppTheme">
-
-        <!--
-          view-fix2（真机反馈：界面长、顶部输入框够不着）：
-            android:windowSoftInputMode="adjustResize" —— 软键盘弹出时「压缩窗口高度」而不是「整体上推内容」。
-            选 adjustResize 而不是 adjustPan 的理由：adjustPan 会把整个窗口内容向上顶来保证焦点可见，
-            界面本身就比屏幕长，被顶上去后**顶部控件的坐标会被顶出可视区**（正是用户说的「『密码』以上不能访问」），
-            而 ScrollView 的长度不变 → 顶部仍不可达；adjustResize 缩短 ScrollView 的可视高度，
-            内容仍可滚动，配合下面布局里的 focusable + onCreate 里回到顶部，任何输入框都能滑出来。
-          主题 parent=@android:style/Theme.Material.Light（非 Fullscreen）→ adjustResize 正常生效。
-        -->
-        <activity
-            android:name="top.ytu.srunautologin.ui.MainActivity"
-            android:exported="true"
-            android:label="@string/app_name"
-            android:windowSoftInputMode="adjustResize">
+        android:supportsRtl="true" android:theme="@style/AppTheme">
+        <activity android:name="top.ytu.srunautologin.ui.MainActivity"
+            android:exported="true" android:label="@string/app_name" android:windowSoftInputMode="adjustResize">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
-
-        <!--
-          removemorning1（用户要求「关闭开机广播的触发通道」）：
-          B4 触发点 1（开机自启）的静态广播接收者**已整块删除**——接收者类连同
-          BOOT_COMPLETED / LOCKED_BOOT_COMPLETED / MY_PACKAGE_REPLACED 三个 action 一并移除，
-          RECEIVE_BOOT_COMPLETED 权限在 removemorning1 中同步删除，**persistfix1 已恢复**——唯一原因：JobScheduler.setPersisted(true) 的框架要求，**与开机广播无关**；接收者本身**未恢复**。
-          进程被杀后的兜底改为：周期保底（15 分钟 JobScheduler，App.onCreate 注册）+ 网络变化（动态注册）。
-        -->
-
-        <!--
-          B4 触发点 3：周期保底 + 退避重试的执行体（JobScheduler 方案）。
-          exported="false" + BIND_JOB_SERVICE 权限 → 只有系统能启动；external 服务由系统调度。
-        -->
-        <service
-            android:name="top.ytu.srunautologin.work.AuthJobService"
-            android:exported="false"
-            android:permission="android.permission.BIND_JOB_SERVICE" />
-
-        <!--
-          restoretoggle1（用户要求「恢复常驻通知，方案 A」）：常驻通知前台服务**恢复声明**。
-          它只做两件事：显示/移除一条不可消除的常驻通知 + 保持前台状态；**不做认证**
-          （认证仍由上面的 AuthJobService 执行，两者生命周期本就不同）。
-          类型选 dataSync（标准类型，无需 specialUse 的额外 property 与人工审核）：
-          与类型权限 FOREGROUND_SERVICE_DATA_SYNC 配对，通用权限 FOREGROUND_SERVICE 同时声明。
-          exported="false"：只有本应用自己启动它（启动/停止均由 AutoLoginSwitch 的状态决定）。
-        -->
-        <service
-            android:name="top.ytu.srunautologin.work.MorningAuthForegroundService"
-            android:exported="false"
-            android:foregroundServiceType="dataSync" />
-
-        <!--
-          removemorning1：本接收者 **保留**（**不是**早上任务专用）。
-          它的 action（ACTION_MORNING）现在只服务「探测不确定 → 5 分钟重试」这条闹钟通道
-          （work/AuthWorkWiring.kt 的 scheduleRetry → MorningAuthRuntime.scheduleProbeRetry）。
-          06:00 的首次闹钟与 +10 分钟重试**已不在任何地方排期**；接收者内部对非探测来源的触发
-          一律直接返回（见 work/MorningAuthRuntime.kt 的 MorningAlarmReceiver.handle）。
-          exported=false：只接收本应用自己发的 PendingIntent（不需要外部投递）。
-        -->
-        <receiver
-            android:name="top.ytu.srunautologin.work.MorningAlarmReceiver"
-            android:enabled="true"
-            android:exported="false" />
-
-        <!--
-          注意（Android 7+ 隐式广播限制）：CONNECTIVITY_ACTION **不在**豁免清单里，
-          静态注册收不到，因此这里**故意不注册** NetworkChangeReceiver；
-          改由 App.onCreate 动态注册（Context.RECEIVER_NOT_EXPORTED）+ NetworkCallback 实现（B4 触发点 2）。
-        -->
-
+        <service android:name="top.ytu.srunautologin.work.AuthJobService"
+            android:exported="false" android:permission="android.permission.BIND_JOB_SERVICE" />
+        <service android:name="top.ytu.srunautologin.work.MorningAuthForegroundService"
+            android:exported="false" android:foregroundServiceType="specialUse|location">
+            <property android:name="android.app.PROPERTY_SPECIAL_USE_FGS_SUBTYPE"
+                android:value="User-enabled campus WiFi connectivity monitoring and captive-portal authentication; location access identifies the saved WiFi network, without collecting coordinates." />
+        </service>
+        <receiver android:name="top.ytu.srunautologin.work.AutoLoginRestoreReceiver"
+            android:enabled="true" android:exported="false">
+            <intent-filter>
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <action android:name="android.intent.action.MY_PACKAGE_REPLACED" />
+            </intent-filter>
+        </receiver>
     </application>
-
 </manifest>

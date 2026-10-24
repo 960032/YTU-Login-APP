@@ -75,7 +75,7 @@ object AuthFlowRunner {
      * 「是否发请求」由 AuthFlow 内部唯一的 B8 判据决定（flow/AuthFlow.kt:162-176）。
      */
     fun targetOf(currentSsid: String?, configuredTarget: String?, boundSsids: List<String>): String? {
-        val explicit = configuredTarget?.trim()?.takeIf { it.isNotEmpty() }
+        val explicit = configuredTarget?.takeIf { it.isNotEmpty() }
         if (explicit != null) return explicit
         val bound = boundSsids.filter { it.isNotBlank() }
         // 下面这一处比较只用于「在候选集合里挑选一个 SSID 作为参数」。
